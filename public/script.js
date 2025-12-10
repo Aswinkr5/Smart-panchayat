@@ -1,5 +1,40 @@
-const API_BASE = 'http://localhost:8181/api';
-        
+const API_BASE_URL = 'https://smart-panchayat.onrender.com';
+const API_BASE = API_BASE_URL + '/api';
+console.log('API Base:', API_BASE);
+// Add after line 2 in script.js
+console.log('Mobile Debug Info:');
+console.log('User Agent:', navigator.userAgent);
+console.log('Platform:', navigator.platform);
+console.log('Screen:', screen.width, 'x', screen.height);
+
+// Test the API immediately
+async function testAPIConnection() {
+    try {
+        console.log('Testing API connection to:', API_BASE + '/health');
+        const response = await fetch(API_BASE + '/health');
+        const data = await response.json();
+        console.log('API Test Success:', data);
+        return true;
+    } catch (error) {
+        console.error('API Test Failed:', error);
+        return false;
+    }
+}
+
+// Call it on load
+document.addEventListener('DOMContentLoaded', async function() {
+    console.log('🚀 Dashboard loading...');
+    const apiConnected = await testAPIConnection();
+    if (apiConnected) {
+        loadDashboard();
+        loadAllVillagers();
+        loadAllSensors();
+    } else {
+        showToast('⚠️ Cannot connect to server. Please wait...', 'warning');
+        // Retry after 5 seconds
+        setTimeout(() => location.reload(), 5000);
+    }
+});        
         // Initialize dashboard on load
         document.addEventListener('DOMContentLoaded', function() {
             console.log('🚀 Dashboard loading...');
