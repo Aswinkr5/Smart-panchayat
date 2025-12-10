@@ -4,44 +4,29 @@ const cors = require('cors');
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
 const path = require('path');
 const app = express();
-//const PORT = 8181;
 
 // ==================== INFLUXDB CONFIGURATION ====================
 const INFLUX_CONFIG = {
   url: process.env.INFLUX_URL || 'https://us-east-1-1.aws.cloud2.influxdata.com',
-  token: process.env.INFLUX_TOKEN, // FROM ENVIRONMENT
+  token: process.env.INFLUX_TOKEN,
   org: process.env.INFLUX_ORG || 'Smart Panchayat Org',
   bucket: process.env.INFLUX_BUCKET || 'smart_panchayat'
 };
 
-const PORT = process.env.PORT || 8181; 
+const PORT = process.env.PORT || 8181;
+
 // Initialize InfluxDB clients
 const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.token });
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
 // ==================== MIDDLEWARE ====================
-
-
-// Update CORS middleware to allow mobile access
 app.use(cors({
-  origin: '*',  // Allow ALL origins for now (for testing)
-  credentials: false,  // Must be false when using '*'
+  origin: '*',
+  credentials: false,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
-
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-      return res.sendStatus(200);
-  }
-  next();
-});
 
 app.use(express.json());
 
@@ -51,9 +36,150 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==================== HELPER FUNCTIONS ====================
+// ==================== ADMIN AUTHENTICATION ====================
+const ADMIN_USERS = {
+  'admin': {
+    password: 'smart@panchayat2024',
+    name: 'Super Admin',
+    email: 'admin@smartpanchayat.in',
+    role: 'super_admin',
+    permissions: ['all']
+  },
+  'panchayat_admin': {
+    password: 'panchayat@admin',
+    name: 'Panchayat Admin',
+    email: 'officer@smartpanchayat.in',
+    role: 'admin',
+    permissions: ['view_dashboard', 'manage_villagers', 'view_reports']
+  }
+};
 
-// Query InfluxDB helper
+// Login endpoint - ADMIN ONLY
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    
+    console.log('🔐 Admin login attempt:', username);
+    
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Username and password are required'
+      });
+    }
+    
+    const admin = ADMIN_USERS[username];
+    
+    if (!admin || admin.password !== password) {
+      console.log('❌ Invalid credentials for:', username);
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid admin credentials'
+      });
+    }
+    
+    const tokenData = {
+      username: username,
+      role: admin.role,
+      name: admin.name,
+      timestamp: Date.now(),
+      expires: Date.now() + (8 * 60 * 60 * 1000)
+    };
+    
+    const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
+    const { password: _, ...adminWithoutPassword } = admin;
+    
+    console.log('✅ Admin login successful:', username);
+    
+    res.json({
+      success: true,
+      message: 'Admin login successful',
+      token: token,
+      admin: adminWithoutPassword,
+      expiresIn: 28800
+    });
+    
+  } catch (error) {
+    console.error('❌ Admin login error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Login failed'
+    });
+  }
+});
+
+// Logout endpoint
+app.post('/api/admin/logout', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Logout successful'
+  });
+});
+
+// Verify Admin Token Middleware
+function authenticateAdmin(req, res, next) {
+  try {
+    // Skip authentication for public endpoints
+    const publicPaths = ['/api/health', '/api/test', '/api/admin/login', '/api/login'];
+    if (publicPaths.includes(req.path)) {
+      return next();
+    }
+    
+    const authHeader = req.headers['authorization'];
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Admin access token required'
+      });
+    }
+    
+    const token = authHeader.split(' ')[1];
+    const decoded = Buffer.from(token, 'base64').toString('ascii');
+    const tokenData = JSON.parse(decoded);
+    
+    if (Date.now() > tokenData.expires) {
+      return res.status(401).json({
+        success: false,
+        error: 'Admin session expired. Please login again.'
+      });
+    }
+    
+    if (!ADMIN_USERS[tokenData.username]) {
+      return res.status(403).json({
+        success: false,
+        error: 'Invalid admin credentials'
+      });
+    }
+    
+    req.admin = {
+      username: tokenData.username,
+      name: tokenData.name,
+      role: tokenData.role
+    };
+    
+    console.log(`✅ Admin access: ${tokenData.name} (${tokenData.role})`);
+    next();
+    
+  } catch (error) {
+    console.error('❌ Token verification error:', error);
+    return res.status(403).json({
+      success: false,
+      error: 'Invalid admin token'
+    });
+  }
+}
+
+// Check admin session
+app.get('/api/admin/check-session', authenticateAdmin, (req, res) => {
+  res.json({
+    success: true,
+    admin: req.admin,
+    message: 'Admin session is valid'
+  });
+});
+
+// ==================== HELPER FUNCTIONS ====================
 async function queryInfluxDB(fluxQuery) {
   try {
     const result = await queryApi.collectRows(fluxQuery);
@@ -64,19 +190,16 @@ async function queryInfluxDB(fluxQuery) {
   }
 }
 
-// Write to InfluxDB helper
 async function writeToInfluxDB(measurement, tags, fields) {
   try {
     const point = new Point(measurement);
     
-    // Add tags
     Object.entries(tags).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         point.tag(key, value.toString());
       }
     });
     
-    // Add fields
     Object.entries(fields).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         point.stringField(key, value.toString());
@@ -93,7 +216,6 @@ async function writeToInfluxDB(measurement, tags, fields) {
   }
 }
 
-// Get all fields for a specific villager
 async function getVillagerFields(aadhaarNumber) {
   try {
     const query = `
@@ -106,8 +228,8 @@ async function getVillagerFields(aadhaarNumber) {
     `;
     
     const result = await queryInfluxDB(query);
-    
     const data = { aadhaar_number: aadhaarNumber };
+    
     result.forEach(row => {
       if (row._field && row._value !== undefined) {
         data[row._field] = row._value;
@@ -121,9 +243,7 @@ async function getVillagerFields(aadhaarNumber) {
   }
 }
 
-// ==================== API ROUTES ====================
-
-// Test endpoint
+// ==================== PUBLIC API ROUTES ====================
 app.get('/api/test', (req, res) => {
   res.json({
     success: true,
@@ -132,7 +252,6 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Health check
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
@@ -142,14 +261,11 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ==================== VILLAGER MANAGEMENT ====================
+// ==================== PROTECTED API ROUTES ====================
 
-// Get all villagers - WITH PHONE NUMBERS
-app.get('/api/villagers', async (req, res) => {
-  console.log('📥 GET /api/villagers called');
-  
+// ADMIN DASHBOARD - PROTECTED
+app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
   try {
-    // Get all name entries first
     const nameQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: -365d)
@@ -160,15 +276,12 @@ app.get('/api/villagers', async (req, res) => {
     `;
     
     const nameResult = await queryInfluxDB(nameQuery);
-    
-    // Process results - get unique latest entries
     const villagersMap = new Map();
     
     nameResult.forEach(row => {
       const aadhaar = row.aadhaar_number;
       const time = new Date(row._time).getTime();
       
-      // Only keep the latest entry for each aadhaar
       if (!villagersMap.has(aadhaar) || time > villagersMap.get(aadhaar).time) {
         villagersMap.set(aadhaar, {
           time: time,
@@ -181,13 +294,105 @@ app.get('/api/villagers', async (req, res) => {
       }
     });
     
-    // Get phone numbers for active villagers
+    const activeVillagers = Array.from(villagersMap.values())
+      .filter(v => v.status !== 'deleted');
+    
+    const totalVillagers = activeVillagers.length;
+    const recentVillagers = [];
+    const recentActive = activeVillagers.sort((a, b) => b.time - a.time).slice(0, 5);
+    
+    for (const data of recentActive) {
+      const phoneQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -365d)
+          |> filter(fn: (r) => r._measurement == "villagers")
+          |> filter(fn: (r) => r.aadhaar_number == "${data.aadhaar_number}")
+          |> filter(fn: (r) => r._field == "phone")
+          |> last()
+      `;
+      
+      const phoneResult = await queryInfluxDB(phoneQuery);
+      const phone = phoneResult.length > 0 ? phoneResult[0]._value : '';
+      
+      recentVillagers.push({
+        name: data.name || 'Unknown',
+        aadhaar_number: data.aadhaar_number,
+        village: data.village || '',
+        phone: phone || ''
+      });
+    }
+    
+    console.log(`📊 Dashboard accessed by: ${req.admin.name}`);
+    
+    res.json({
+      success: true,
+      data: {
+        statistics: {
+          totalVillagers: totalVillagers,
+          totalSensors: 0,
+          totalVillages: 1,
+          activeAlerts: 0
+        },
+        recentVillagers: recentVillagers,
+        recentSensors: []
+      }
+    });
+  } catch (error) {
+    console.error('❌ Dashboard error:', error);
+    res.json({
+      success: true,
+      data: {
+        statistics: {
+          totalVillagers: 0,
+          totalSensors: 0,
+          totalVillages: 1,
+          activeAlerts: 0
+        },
+        recentVillagers: [],
+        recentSensors: []
+      }
+    });
+  }
+});
+
+// VILLAGER MANAGEMENT - PROTECTED
+app.get('/api/villagers', authenticateAdmin, async (req, res) => {
+  console.log('📥 GET /api/villagers called by:', req.admin.name);
+  
+  try {
+    const nameQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -365d)
+        |> filter(fn: (r) => r._measurement == "villagers")
+        |> filter(fn: (r) => r._field == "name")
+        |> group()
+        |> sort(columns: ["_time"], desc: true)
+    `;
+    
+    const nameResult = await queryInfluxDB(nameQuery);
+    const villagersMap = new Map();
+    
+    nameResult.forEach(row => {
+      const aadhaar = row.aadhaar_number;
+      const time = new Date(row._time).getTime();
+      
+      if (!villagersMap.has(aadhaar) || time > villagersMap.get(aadhaar).time) {
+        villagersMap.set(aadhaar, {
+          time: time,
+          aadhaar_number: aadhaar,
+          name: row._value,
+          village: row.village || '',
+          panchayat: row.panchayat || '',
+          status: row.status || 'active'
+        });
+      }
+    });
+    
     const villagers = [];
     let idCounter = 1;
     
     for (const [aadhaar, data] of villagersMap) {
       if (data.status !== 'deleted') {
-        // Get phone number for this villager
         const phoneQuery = `
           from(bucket: "${INFLUX_CONFIG.bucket}")
             |> range(start: -365d)
@@ -229,11 +434,10 @@ app.get('/api/villagers', async (req, res) => {
   }
 });
 
-// Get a specific villager - WITH ALL FIELDS
-app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
+app.get('/api/villagers/:aadhaarNumber', authenticateAdmin, async (req, res) => {
   try {
     const { aadhaarNumber } = req.params;
-    console.log(`📥 GET /api/villagers/${aadhaarNumber} called`);
+    console.log(`📥 GET /api/villagers/${aadhaarNumber} called by: ${req.admin.name}`);
 
     const data = await getVillagerFields(aadhaarNumber);
     
@@ -269,8 +473,7 @@ app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// Add new villager
-app.post('/api/villagers', async (req, res) => {
+app.post('/api/villagers', authenticateAdmin, async (req, res) => {
   try {
     const {
       aadhaarNumber,
@@ -283,9 +486,8 @@ app.post('/api/villagers', async (req, res) => {
       occupation
     } = req.body;
 
-    console.log('📥 POST /api/villagers called with data:', req.body);
+    console.log('📥 POST /api/villagers called by:', req.admin.name, 'Data:', req.body);
 
-    // Validation
     if (!aadhaarNumber || !name || !village || !panchayat) {
       return res.status(400).json({
         success: false,
@@ -300,7 +502,6 @@ app.post('/api/villagers', async (req, res) => {
       });
     }
 
-    // Write villager data
     const writeSuccess = await writeToInfluxDB('villagers', {
       aadhaar_number: aadhaarNumber,
       village: village,
@@ -322,7 +523,7 @@ app.post('/api/villagers', async (req, res) => {
       });
     }
 
-    console.log('✅ New villager added:', { aadhaarNumber, name });
+    console.log('✅ New villager added by:', req.admin.name, 'Details:', { aadhaarNumber, name });
 
     res.json({
       success: true,
@@ -348,11 +549,10 @@ app.post('/api/villagers', async (req, res) => {
   }
 });
 
-// Delete a villager
-app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
+app.delete('/api/villagers/:aadhaarNumber', authenticateAdmin, async (req, res) => {
   try {
     const { aadhaarNumber } = req.params;
-    console.log(`🗑️ DELETE /api/villagers/${aadhaarNumber} called`);
+    console.log(`🗑️ DELETE /api/villagers/${aadhaarNumber} called by: ${req.admin.name}`);
 
     if (!aadhaarNumber) {
       return res.status(400).json({
@@ -361,7 +561,6 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
       });
     }
 
-    // Get villager details
     const data = await getVillagerFields(aadhaarNumber);
     
     if (!data || data.status === 'deleted') {
@@ -371,7 +570,6 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
       });
     }
 
-    // Mark as deleted
     const writeSuccess = await writeToInfluxDB('villagers', {
       aadhaar_number: aadhaarNumber,
       village: data.village || 'unknown',
@@ -391,7 +589,7 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
       });
     }
 
-    console.log('✅ Villager marked as deleted:', aadhaarNumber);
+    console.log('✅ Villager marked as deleted by:', req.admin.name, 'Aadhaar:', aadhaarNumber);
 
     res.json({
       success: true,
@@ -407,8 +605,7 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// Update a villager
-app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
+app.put('/api/villagers/:aadhaarNumber', authenticateAdmin, async (req, res) => {
   try {
     const { aadhaarNumber } = req.params;
     const {
@@ -421,7 +618,7 @@ app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
       occupation
     } = req.body;
 
-    console.log('📝 PUT /api/villagers/:aadhaarNumber called:', aadhaarNumber, req.body);
+    console.log('📝 PUT /api/villagers/:aadhaarNumber called by:', req.admin.name, 'Data:', req.body);
 
     if (!aadhaarNumber) {
       return res.status(400).json({
@@ -430,7 +627,6 @@ app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
       });
     }
 
-    // Check if villager exists and is active
     const existingData = await getVillagerFields(aadhaarNumber);
     if (!existingData || existingData.status !== 'active') {
       return res.status(404).json({
@@ -466,7 +662,7 @@ app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
       });
     }
 
-    console.log('✅ Villager updated:', aadhaarNumber);
+    console.log('✅ Villager updated by:', req.admin.name, 'Aadhaar:', aadhaarNumber);
 
     res.json({
       success: true,
@@ -486,111 +682,8 @@ app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// ==================== ADMIN DASHBOARD ====================
-
-app.get('/api/admin/dashboard', async (req, res) => {
-  try {
-    // Get all name entries first
-    const nameQuery = `
-      from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: -365d)
-        |> filter(fn: (r) => r._measurement == "villagers")
-        |> filter(fn: (r) => r._field == "name")
-        |> group()
-        |> sort(columns: ["_time"], desc: true)
-    `;
-    
-    const nameResult = await queryInfluxDB(nameQuery);
-    
-    // Process results - get unique latest entries
-    const villagersMap = new Map();
-    
-    nameResult.forEach(row => {
-      const aadhaar = row.aadhaar_number;
-      const time = new Date(row._time).getTime();
-      
-      if (!villagersMap.has(aadhaar) || time > villagersMap.get(aadhaar).time) {
-        villagersMap.set(aadhaar, {
-          time: time,
-          aadhaar_number: aadhaar,
-          name: row._value,
-          village: row.village || '',
-          panchayat: row.panchayat || '',
-          status: row.status || 'active'
-        });
-      }
-    });
-    
-    // Count active villagers
-    const activeVillagers = Array.from(villagersMap.values())
-      .filter(v => v.status !== 'deleted');
-    
-    const totalVillagers = activeVillagers.length;
-    
-    // Get phone numbers for recent villagers
-    const recentVillagers = [];
-    
-    // Get top 5 most recent active villagers
-    const recentActive = activeVillagers
-      .sort((a, b) => b.time - a.time)
-      .slice(0, 5);
-    
-    for (const data of recentActive) {
-      // Get phone number for this villager
-      const phoneQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -365d)
-          |> filter(fn: (r) => r._measurement == "villagers")
-          |> filter(fn: (r) => r.aadhaar_number == "${data.aadhaar_number}")
-          |> filter(fn: (r) => r._field == "phone")
-          |> last()
-      `;
-      
-      const phoneResult = await queryInfluxDB(phoneQuery);
-      const phone = phoneResult.length > 0 ? phoneResult[0]._value : '';
-      
-      recentVillagers.push({
-        name: data.name || 'Unknown',
-        aadhaar_number: data.aadhaar_number,
-        village: data.village || '',
-        phone: phone || ''
-      });
-    }
-    
-    res.json({
-      success: true,
-      data: {
-        statistics: {
-          totalVillagers: totalVillagers,
-          totalSensors: 0,
-          totalVillages: 1,
-          activeAlerts: 0
-        },
-        recentVillagers: recentVillagers,
-        recentSensors: []
-      }
-    });
-  } catch (error) {
-    console.error('❌ Dashboard error:', error);
-    res.json({
-      success: true,
-      data: {
-        statistics: {
-          totalVillagers: 0,
-          totalSensors: 0,
-          totalVillages: 1,
-          activeAlerts: 0
-        },
-        recentVillagers: [],
-        recentSensors: []
-      }
-    });
-  }
-});
-
 // ==================== OTHER ENDPOINTS ====================
-
-app.get('/api/sensors', (req, res) => {
+app.get('/api/sensors', authenticateAdmin, (req, res) => {
   res.json({
     success: true,
     sensors: [],
@@ -598,7 +691,7 @@ app.get('/api/sensors', (req, res) => {
   });
 });
 
-app.post('/api/sensors', (req, res) => {
+app.post('/api/sensors', authenticateAdmin, (req, res) => {
   res.json({
     success: true,
     message: 'Sensor added (simulated)',
@@ -606,6 +699,7 @@ app.post('/api/sensors', (req, res) => {
   });
 });
 
+// Legacy login endpoint (for backward compatibility)
 app.post('/api/login', (req, res) => {
   const { aadhaarNumber } = req.body;
 
@@ -629,8 +723,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// Debug endpoint
-app.get('/api/debug/raw', async (req, res) => {
+app.get('/api/debug/raw', authenticateAdmin, async (req, res) => {
   try {
     const query = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -656,7 +749,6 @@ app.get('/api/debug/raw', async (req, res) => {
 });
 
 // ==================== SERVING HTML PAGES ====================
-
 // Serve static files from public directory
 app.use(express.static('public'));
 
@@ -671,7 +763,6 @@ app.get('/', (req, res) => {
 });
 
 // ==================== API 404 HANDLER ====================
-
 app.use('/api', (req, res) => {
   res.status(404).json({
     success: false,
@@ -680,7 +771,6 @@ app.use('/api', (req, res) => {
 });
 
 // ==================== ERROR HANDLER ====================
-
 app.use((err, req, res, next) => {
   console.error('❌ Server error:', err.message);
   res.status(500).json({
@@ -691,23 +781,20 @@ app.use((err, req, res, next) => {
 });
 
 // ==================== START SERVER ====================
-
 app.listen(PORT, () => {
   console.log('🚀 Smart Panchayat Backend');
   console.log('══════════════════════════════════════════════════════');
   console.log(`📡 Server: http://localhost:${PORT}`);
   console.log(`🔧 API:    http://localhost:${PORT}/api`);
-  console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
+  console.log(`🔐 Admin:  http://localhost:${PORT}/admin`);
   console.log('══════════════════════════════════════════════════════');
   console.log('✅ Available API Endpoints:');
-  console.log('   GET  /api/test');
-  console.log('   GET  /api/health');
-  console.log('   GET  /api/villagers (with phone numbers)');
-  console.log('   POST /api/villagers');
-  console.log('   GET  /api/villagers/:aadhaarNumber');
-  console.log('   PUT  /api/villagers/:aadhaarNumber');
-  console.log('   DELETE /api/villagers/:aadhaarNumber');
-  console.log('   GET  /api/admin/dashboard (with phone numbers)');
-  console.log('   GET  /api/debug/raw');
+  console.log('   POST /api/admin/login    - Admin login');
+  console.log('   POST /api/admin/logout   - Admin logout');
+  console.log('   GET  /api/admin/dashboard - Admin dashboard (protected)');
+  console.log('   GET  /api/villagers      - Get all villagers (protected)');
+  console.log('   POST /api/villagers      - Add villager (protected)');
+  console.log('   GET  /api/health         - Health check (public)');
+  console.log('   GET  /api/test           - Test endpoint (public)');
   console.log('══════════════════════════════════════════════════════');
 });
