@@ -21,22 +21,27 @@ const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
 // ==================== MIDDLEWARE ====================
-const cors = require('cors');
+
 
 // Update CORS middleware to allow mobile access
 app.use(cors({
-    origin: [
-        'http://localhost:5580',      // Local development
-        'http://127.0.0.1:5580',      // Local IP
-        'http://localhost:3000',      // Render local
-        'https://smart-panchayat.onrender.com',  // Your Render URL
-        '*',                          // Temporary - allow all (remove for production)
-        // Add your Flutter app URL when you deploy it
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+  origin: '*',  // Allow ALL origins for now (for testing)
+  credentials: false,  // Must be false when using '*'
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
+
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+  }
+  next();
+});
 
 app.use(express.json());
 
