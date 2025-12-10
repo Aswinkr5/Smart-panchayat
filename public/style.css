@@ -1,0 +1,39 @@
+.sidebar {
+    min-height: 100vh;
+    background: #198754;
+    color: white;
+}
+.sidebar .nav-link {
+    color: rgba(255,255,255,.8);
+    padding: 12px 20px;
+    margin: 5px 0;
+}
+.sidebar .nav-link:hover {
+    background: rgba(255,255,255,.1);
+    color: white;
+}
+.sidebar .nav-link.active {
+    background: rgba(255,255,255,.2);
+    color: white;
+}
+.stat-card {
+    border-radius: 10px;
+    transition: transform 0.3s;
+}
+.stat-card:hover {
+    transform: translateY(-5px);
+}
+.realtime-badge {
+    animation: pulse 2s infinite;
+}
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.7; }
+    100% { opacity: 1; }
+}
+.toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1050;
+}
