@@ -21,11 +21,23 @@ const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
 // ==================== MIDDLEWARE ====================
+const cors = require('cors');
+
+// Update CORS middleware to allow mobile access
 app.use(cors({
-  origin: ['http://localhost:5500', 'http://127.0.0.1:5500', 'http://localhost:8181', '*'],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+    origin: [
+        'http://localhost:5580',      // Local development
+        'http://127.0.0.1:5580',      // Local IP
+        'http://localhost:3000',      // Render local
+        'https://smart-panchayat.onrender.com',  // Your Render URL
+        '*',                          // Temporary - allow all (remove for production)
+        // Add your Flutter app URL when you deploy it
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
+
 app.use(express.json());
 
 // Log all requests
