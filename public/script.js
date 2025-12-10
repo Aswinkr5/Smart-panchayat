@@ -1,7 +1,8 @@
+
 const API_BASE_URL = 'https://smart-panchayat.onrender.com';
 const API_BASE = API_BASE_URL + '/api';
 console.log('API Base:', API_BASE);
-// Add after line 2 in script.js
+
 console.log('Mobile Debug Info:');
 console.log('User Agent:', navigator.userAgent);
 console.log('Platform:', navigator.platform);
@@ -21,7 +22,7 @@ async function testAPIConnection() {
     }
 }
 
-// Call it on load
+// SINGLE DOMContentLoaded listener
 document.addEventListener('DOMContentLoaded', async function() {
     console.log('🚀 Dashboard loading...');
     const apiConnected = await testAPIConnection();
@@ -34,14 +35,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         // Retry after 5 seconds
         setTimeout(() => location.reload(), 5000);
     }
-});        
-        // Initialize dashboard on load
-        document.addEventListener('DOMContentLoaded', function() {
-            console.log('🚀 Dashboard loading...');
-            loadDashboard();
-            loadAllVillagers();
-            loadAllSensors();
-        });
+});
         
         // Section navigation
         function showSection(section) {
@@ -288,7 +282,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         
         // Edit villager function
-        // Edit villager function - FIXED
 async function editVillager(aadhaarNumber) {
   try {
     console.log(`📝 Editing villager with Aadhaar: ${aadhaarNumber}`);
@@ -379,52 +372,7 @@ async function updateVillager() {
   }
 }
         
-        // Update villager function
-async function updateVillager() {
-  try {
-    const aadhaarNumber = document.getElementById('editAadhaarNumber').value;
-    const form = document.getElementById('editVillagerForm');
-    const formData = new FormData(form);
-    const data = Object.fromEntries(formData);
-    
-    // Remove aadhaarNumber from data since it's in the URL
-    delete data.aadhaarNumber;
-    
-    console.log('📤 Updating villager:', aadhaarNumber, data);
-    
-    const response = await fetch(`${API_BASE}/villagers/${aadhaarNumber}`, {
-      method: 'PUT',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(data)
-    });
-    
-    const result = await response.json();
-    console.log('✅ Server response:', result);
-    
-    if (result.success) {
-      showToast('✅ Villager updated successfully!', 'success');
-      bootstrap.Modal.getInstance(document.getElementById('editVillagerModal')).hide();
-      
-      setTimeout(() => {
-        loadDashboard();
-        loadAllVillagers();
-      }, 500);
-      
-    } else {
-      showToast('❌ Error: ' + (result.error || 'Unknown error'), 'danger');
-    }
-    
-  } catch (error) {
-    console.error('❌ Update error:', error);
-    showToast('⚠️ Failed to update villager. Please try again.', 'warning');
-  }
-}
-        
         // Delete villager function
-        // Delete villager function - UPDATED
 async function deleteVillager(aadhaarNumber) {
   if (!confirm('Are you sure you want to delete this villager? This action cannot be undone.')) {
     return;
