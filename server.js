@@ -14,7 +14,7 @@ const INFLUX_CONFIG = {
   bucket: process.env.INFLUX_BUCKET || 'smart_panchayat'
 };
 
-const PORT = process.env.PORT || 8181; 
+const PORT = process.env.PORT || 8181;
 // Initialize InfluxDB clients
 const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.token });
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
@@ -35,7 +35,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
+
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
@@ -50,7 +50,6 @@ app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
 });
-
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -69,21 +68,21 @@ async function queryInfluxDB(fluxQuery) {
 async function writeToInfluxDB(measurement, tags, fields) {
   try {
     const point = new Point(measurement);
-    
+
     // Add tags
     Object.entries(tags).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         point.tag(key, value.toString());
       }
     });
-    
+
     // Add fields
     Object.entries(fields).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         point.stringField(key, value.toString());
       }
     });
-    
+
     writeApi.writePoint(point);
     await writeApi.flush();
     console.log(`✅ Written to InfluxDB`);
@@ -105,16 +104,16 @@ async function getVillagerFields(aadhaarNumber) {
         |> filter(fn: (r) => r._field == "name" or r._field == "phone" or r._field == "status" or r._field == "village" or r._field == "panchayat")
         |> last()
     `;
-    
+
     const result = await queryInfluxDB(query);
-    
+
     const data = { aadhaar_number: aadhaarNumber };
     result.forEach(row => {
       if (row._field && row._value !== undefined) {
         data[row._field] = row._value;
       }
     });
-    
+
     return data;
   } catch (error) {
     console.error('Error getting villager fields:', error);
@@ -148,7 +147,7 @@ app.get('/api/health', (req, res) => {
 // Get all villagers - WITH PHONE NUMBERS
 app.get('/api/villagers', async (req, res) => {
   console.log('📥 GET /api/villagers called');
-  
+
   try {
     // Get all name entries first
     const nameQuery = `
@@ -159,16 +158,16 @@ app.get('/api/villagers', async (req, res) => {
         |> group()
         |> sort(columns: ["_time"], desc: true)
     `;
-    
+
     const nameResult = await queryInfluxDB(nameQuery);
-    
+
     // Process results - get unique latest entries
     const villagersMap = new Map();
-    
+
     nameResult.forEach(row => {
       const aadhaar = row.aadhaar_number;
       const time = new Date(row._time).getTime();
-      
+
       // Only keep the latest entry for each aadhaar
       if (!villagersMap.has(aadhaar) || time > villagersMap.get(aadhaar).time) {
         villagersMap.set(aadhaar, {
@@ -181,11 +180,11 @@ app.get('/api/villagers', async (req, res) => {
         });
       }
     });
-    
+
     // Get phone numbers for active villagers
     const villagers = [];
     let idCounter = 1;
-    
+
     for (const [aadhaar, data] of villagersMap) {
       if (data.status !== 'deleted') {
         // Get phone number for this villager
@@ -197,10 +196,10 @@ app.get('/api/villagers', async (req, res) => {
             |> filter(fn: (r) => r._field == "phone")
             |> last()
         `;
-        
+
         const phoneResult = await queryInfluxDB(phoneQuery);
         const phone = phoneResult.length > 0 ? phoneResult[0]._value : '';
-        
+
         villagers.push({
           id: idCounter++,
           aadhaar_number: aadhaar,
@@ -211,15 +210,15 @@ app.get('/api/villagers', async (req, res) => {
         });
       }
     }
-    
+
     console.log(`✅ Found ${villagers.length} active villagers`);
-    
+
     res.json({
       success: true,
       villagers: villagers,
       count: villagers.length
     });
-    
+
   } catch (error) {
     console.error('❌ Error fetching villagers:', error);
     res.status(500).json({
@@ -237,7 +236,7 @@ app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
     console.log(`📥 GET /api/villagers/${aadhaarNumber} called`);
 
     const data = await getVillagerFields(aadhaarNumber);
-    
+
     if (!data || data.status === 'deleted') {
       return res.status(404).json({
         success: false,
@@ -315,7 +314,7 @@ app.post('/api/villagers', async (req, res) => {
       occupation: occupation || '',
       role: 'villager'
     });
-    
+
     if (!writeSuccess) {
       return res.status(500).json({
         success: false,
@@ -364,7 +363,7 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
 
     // Get villager details
     const data = await getVillagerFields(aadhaarNumber);
-    
+
     if (!data || data.status === 'deleted') {
       return res.status(404).json({
         success: false,
@@ -500,16 +499,16 @@ app.get('/api/admin/dashboard', async (req, res) => {
         |> group()
         |> sort(columns: ["_time"], desc: true)
     `;
-    
+
     const nameResult = await queryInfluxDB(nameQuery);
-    
+
     // Process results - get unique latest entries
     const villagersMap = new Map();
-    
+
     nameResult.forEach(row => {
       const aadhaar = row.aadhaar_number;
       const time = new Date(row._time).getTime();
-      
+
       if (!villagersMap.has(aadhaar) || time > villagersMap.get(aadhaar).time) {
         villagersMap.set(aadhaar, {
           time: time,
@@ -521,21 +520,21 @@ app.get('/api/admin/dashboard', async (req, res) => {
         });
       }
     });
-    
+
     // Count active villagers
     const activeVillagers = Array.from(villagersMap.values())
       .filter(v => v.status !== 'deleted');
-    
+
     const totalVillagers = activeVillagers.length;
-    
+
     // Get phone numbers for recent villagers
     const recentVillagers = [];
-    
+
     // Get top 5 most recent active villagers
     const recentActive = activeVillagers
       .sort((a, b) => b.time - a.time)
       .slice(0, 5);
-    
+
     for (const data of recentActive) {
       // Get phone number for this villager
       const phoneQuery = `
@@ -546,10 +545,10 @@ app.get('/api/admin/dashboard', async (req, res) => {
           |> filter(fn: (r) => r._field == "phone")
           |> last()
       `;
-      
+
       const phoneResult = await queryInfluxDB(phoneQuery);
       const phone = phoneResult.length > 0 ? phoneResult[0]._value : '';
-      
+
       recentVillagers.push({
         name: data.name || 'Unknown',
         aadhaar_number: data.aadhaar_number,
@@ -557,7 +556,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
         phone: phone || ''
       });
     }
-    
+
     res.json({
       success: true,
       data: {
@@ -618,7 +617,7 @@ app.post('/api/login', (req, res) => {
   }
 
   const isAdmin = aadhaarNumber === '999999999999';
-  
+
   res.json({
     success: true,
     token: 'token-' + Date.now(),
@@ -639,9 +638,9 @@ app.get('/api/debug/raw', async (req, res) => {
         |> filter(fn: (r) => true)
         |> limit(n: 50)
     `;
-    
+
     const result = await queryInfluxDB(query);
-    
+
     res.json({
       success: true,
       data: result,
