@@ -596,21 +596,88 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
 // ==================== OTHER ENDPOINTS ====================
 
-app.get('/api/sensors', (req, res) => {
+app.get('/api/sensors', async (req, res) => {
+  try {
+    const sensorQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -365d)
+        |> filter(fn: (r) => r._measurement == "sensors")
+        |> filter(fn: (r) => r._field == "deviceName")
+        |> group(columns: ["devEUI"])
+        |> last()
+    `;
+
+    const sensorsRaw = await queryInfluxDB(sensorQuery);
+    const sensors = [];
+
+    for (const s of sensorsRaw) {
+      const devEUI = s.devEUI;
+
+      const dataQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
+
+      const data = await queryInfluxDB(dataQuery);
+
+      let latestValue = 'No data';
+      let latestTime = '';
+
+      if (data.length > 0) {
+        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        const t = new Date(data[0]._time);
+        latestTime = t.toLocaleString(); // DATE + TIME
+      }
+
+
+      sensors.push({
+        devEUI,
+        name: s._value,
+        measurement: latestValue,
+        time: latestTime
+      });
+      
+    }
+
+    res.json({ success: true, sensors });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/sensors', async (req, res) => {
+  const { devEUI, deviceName } = req.body;
+
+  if (!devEUI || !deviceName) {
+    return res.status(400).json({
+      success: false,
+      error: 'devEUI and deviceName required'
+    });
+  }
+
+  const success = await writeToInfluxDB(
+    'sensors',
+    { devEUI },
+    { deviceName }
+  );
+
+  if (!success) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to save sensor'
+    });
+  }
+
   res.json({
     success: true,
-    sensors: [],
-    count: 0
+    message: 'Sensor registered'
   });
 });
 
-app.post('/api/sensors', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Sensor added (simulated)',
-    data: req.body
-  });
-});
 
 app.post('/api/login', (req, res) => {
   const { aadhaarNumber } = req.body;
@@ -1033,6 +1100,3 @@ app.listen(PORT, () => {
   console.log('   POST /api/verify/resend-otp');
   console.log('══════════════════════════════════════════════════════');
 });
-
-
-
