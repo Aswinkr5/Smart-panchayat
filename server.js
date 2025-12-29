@@ -9,7 +9,7 @@ const app = express();
 const INFLUX_CONFIG = {
   url: process.env.INFLUX_URL || 'https://us-east-1-1.aws.cloud2.influxdata.com',
   token: process.env.INFLUX_TOKEN, // FROM ENVIRONMENT
-  org: process.env.INFLUX_ORG || 'Smart Panchayat Org',
+  org: process.env.INFLUX_ORG || 'NIL',
   bucket: process.env.INFLUX_BUCKET || 'smart_panchayat'
 };
 
@@ -1033,3 +1033,4 @@ app.listen(PORT, () => {
   console.log('   POST /api/verify/resend-otp');
   console.log('══════════════════════════════════════════════════════');
 });
+
