@@ -25,16 +25,25 @@ async function testAPIConnection() {
 document.addEventListener('DOMContentLoaded', async function() {
     console.log('🚀 Dashboard loading...');
     const apiConnected = await testAPIConnection();
+
     if (apiConnected) {
         loadDashboard();
         loadAllVillagers();
         loadAllSensors();
+        loadSensorsForStatus();
+
+        // 🔄 AUTO REFRESH SENSOR DATA (Option A)
+        setInterval(() => {
+            loadAllSensors();
+            loadSensorsForStatus();
+        }, 5000);
+
     } else {
         showToast('⚠️ Cannot connect to server. Please wait...', 'warning');
-        // Retry after 5 seconds
         setTimeout(() => location.reload(), 5000);
     }
 });
+
 
         // Section navigation
         function showSection(section) {
@@ -204,29 +213,28 @@ document.addEventListener('DOMContentLoaded', async function() {
         function updateSensorsTable(sensors) {
             const tbody = document.getElementById('allSensorsTable');
             tbody.innerHTML = '';
-
+          
             if (sensors.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sensors found</td></tr>';
-                return;
+              tbody.innerHTML = '<tr><td colspan="3">No sensors found</td></tr>';
+              return;
             }
-
+          
             sensors.forEach(sensor => {
-                const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>${sensor.id}</td>
-                    <td>${sensor.name}</td>
-                    <td>${sensor.type}</td>
-                    <td>${sensor.location}</td>
-                    <td>${sensor.unit || 'N/A'}</td>
-                    <td><span class="badge bg-success">Active</span></td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-primary">Edit</button>
-                        <button class="btn btn-sm btn-outline-danger">Delete</button>
-                    </td>
-                `;
-                tbody.appendChild(row);
+              const row = document.createElement('tr');
+              row.innerHTML = `
+                <td>${sensor.devEUI}</td>
+                <td>${sensor.name}</td>
+                <td>
+                  ${sensor.measurement}
+                  ${sensor.time ? `<span class="text-muted float-end">${sensor.time}</span>` : ''}
+                </td>
+              `;
+              tbody.appendChild(row);
             });
         }
+          
+        
+          
 
         // Modal functions
         function showAddVillagerModal() {
