@@ -4,7 +4,6 @@ const cors = require('cors');
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
 const path = require('path');
 const app = express();
-//const PORT = 8181;
 
 // ==================== INFLUXDB CONFIGURATION ====================
 const INFLUX_CONFIG = {
@@ -15,13 +14,16 @@ const INFLUX_CONFIG = {
 };
 
 const PORT = process.env.PORT || 8181;
+
 // Initialize InfluxDB clients
 const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.token });
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// ==================== MIDDLEWARE ====================
+// ==================== OTP STORE ====================
+const otpStore = new Map(); // Simple in-memory OTP store
 
+// ==================== MIDDLEWARE ====================
 
 // Update CORS middleware to allow mobile access
 app.use(cors({
@@ -38,7 +40,7 @@ app.use((req, res, next) => {
 
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-      return res.sendStatus(200);
+    return res.sendStatus(200);
   }
   next();
 });
@@ -629,6 +631,306 @@ app.post('/api/login', (req, res) => {
   });
 });
 
+
+// Check if phone number exists in database
+app.post('/api/verify/check-phone', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    
+    console.log('📱 CHECK PHONE request:', { phone });
+
+    if (!phone || phone.length !== 10) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter valid 10-digit phone number'
+      });
+    }
+
+    // Query to find villager by phone number
+    const query = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -365d)
+        |> filter(fn: (r) => r._measurement == "villagers")
+        |> filter(fn: (r) => r._field == "phone")
+        |> filter(fn: (r) => r._value == "${phone}")
+        |> last()
+    `;
+
+    const phoneResult = await queryInfluxDB(query);
+
+    if (phoneResult.length === 0) {
+      return res.json({
+        success: false,
+        error: 'Phone number not registered in our system'
+      });
+    }
+
+    // Get villager details using Aadhaar from phone result
+    const aadhaarNumber = phoneResult[0].aadhaar_number;
+    const villagerData = await getVillagerFields(aadhaarNumber);
+
+    if (!villagerData || villagerData.status !== 'active') {
+      return res.json({
+        success: false,
+        error: 'Villager account is not active'
+      });
+    }
+
+    console.log(`✅ Phone found: ${phone} belongs to ${villagerData.name}`);
+
+    res.json({
+      success: true,
+      message: 'Phone number verified',
+      villager: {
+        aadhaar_number: aadhaarNumber,
+        name: villagerData.name || 'Villager',
+        phone: phone,
+        village: villagerData.village || '',
+        panchayat: villagerData.panchayat || '',
+        role: 'villager'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Phone check error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to check phone number: ' + error.message
+    });
+  }
+});
+
+// ==================== OTP VERIFICATION ====================
+
+// Generate and send OTP (simulated) - UPDATED FOR MOBILE-ONLY
+app.post('/api/verify/send-otp', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    
+    console.log('📱 SEND OTP request (mobile-only):', { phone });
+
+    if (!phone || phone.length !== 10) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter valid 10-digit phone number'
+      });
+    }
+
+    // First check if phone exists
+    const phoneQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -365d)
+        |> filter(fn: (r) => r._measurement == "villagers")
+        |> filter(fn: (r) => r._field == "phone")
+        |> filter(fn: (r) => r._value == "${phone}")
+        |> last()
+    `;
+
+    const phoneResult = await queryInfluxDB(query);
+
+    if (phoneResult.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Phone number not registered'
+      });
+    }
+
+    const aadhaarNumber = phoneResult[0].aadhaar_number;
+    
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+    // Store OTP with phone as key
+    otpStore.set(phone, {
+      otp,
+      expiresAt,
+      phone,
+      aadhaarNumber,
+      attempts: 0
+    });
+
+    console.log(`✅ OTP ${otp} generated for phone ${phone}`);
+
+    res.json({
+      success: true,
+      message: 'OTP sent successfully',
+      otp: otp, // Remove this in production
+      test_mode: true
+    });
+
+  } catch (error) {
+    console.error('❌ OTP send error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send OTP: ' + error.message
+    });
+  }
+});
+// Verify OTP
+// Verify OTP - UPDATED FOR MOBILE-ONLY
+app.post('/api/verify/check-otp', async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    
+    console.log('🔍 VERIFY OTP request (mobile-only):', { phone });
+
+    if (!phone || !otp) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number and OTP are required'
+      });
+    }
+
+    const otpData = otpStore.get(phone);
+
+    // Check if OTP exists
+    if (!otpData) {
+      return res.json({
+        success: false,
+        error: 'OTP not found or expired. Please request a new one.'
+      });
+    }
+
+    // Check if expired
+    if (Date.now() > otpData.expiresAt) {
+      otpStore.delete(phone);
+      return res.json({
+        success: false,
+        error: 'OTP has expired. Please request a new one.'
+      });
+    }
+
+    // Check attempts
+    if (otpData.attempts >= 3) {
+      otpStore.delete(phone);
+      return res.json({
+        success: false,
+        error: 'Too many attempts. OTP invalidated.'
+      });
+    }
+
+    // Verify OTP
+    otpData.attempts++;
+    if (otpData.otp !== otp) {
+      otpStore.set(phone, otpData);
+      return res.json({
+        success: false,
+        error: 'Invalid OTP. Attempts: ' + otpData.attempts
+      });
+    }
+
+    // OTP is correct - get villager data
+    const villagerData = await getVillagerFields(otpData.aadhaarNumber);
+    
+    if (!villagerData) {
+      return res.json({
+        success: false,
+        error: 'Villager data not found'
+      });
+    }
+
+    // Generate token
+    const token = 'villager-' + Date.now() + '-' + phone;
+    
+    // Clear OTP after successful verification
+    otpStore.delete(phone);
+
+    console.log(`✅ OTP verified for phone ${phone}`);
+
+    res.json({
+      success: true,
+      token: token,
+      user: {
+        name: villagerData.name || 'Villager',
+        aadhaar_number: otpData.aadhaarNumber,
+        phone: phone,
+        village: villagerData.village || '',
+        panchayat: villagerData.panchayat || '',
+        role: 'villager',
+        can_edit: false
+      },
+      permissions: {
+        can_view: true,
+        can_edit: false,
+        can_delete: false
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ OTP verification error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'OTP verification failed: ' + error.message
+    });
+  }
+});
+
+// Resend OTP
+app.post('/api/verify/resend-otp', async (req, res) => {
+  try {
+    const { aadhaarNumber, phone } = req.body;
+    
+    console.log('🔄 RESEND OTP request:', { aadhaarNumber });
+
+    if (!aadhaarNumber || !phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Aadhaar number and phone are required'
+      });
+    }
+
+    // Clear any existing OTP
+    otpStore.delete(aadhaarNumber);
+
+    // Call send OTP endpoint logic
+    const villagerData = await getVillagerFields(aadhaarNumber);
+    
+    if (!villagerData || villagerData.status !== 'active') {
+      return res.status(404).json({
+        success: false,
+        error: 'Villager not found'
+      });
+    }
+
+    if (villagerData.phone !== phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number does not match our records'
+      });
+    }
+
+    // Generate new OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+
+    otpStore.set(aadhaarNumber, {
+      otp,
+      expiresAt,
+      phone,
+      attempts: 0
+    });
+
+    console.log(`✅ New OTP ${otp} generated for ${aadhaarNumber}`);
+
+    res.json({
+      success: true,
+      message: 'New OTP sent successfully',
+      otp: otp, // Remove this in production
+      test_mode: true
+    });
+
+  } catch (error) {
+    console.error('❌ Resend OTP error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to resend OTP: ' + error.message
+    });
+  }
+});
+
+// ==================== DEBUG ENDPOINT ====================
+
 // Debug endpoint
 app.get('/api/debug/raw', async (req, res) => {
   try {
@@ -708,6 +1010,9 @@ app.listen(PORT, () => {
   console.log('   PUT  /api/villagers/:aadhaarNumber');
   console.log('   DELETE /api/villagers/:aadhaarNumber');
   console.log('   GET  /api/admin/dashboard (with phone numbers)');
+  console.log('   POST /api/verify/send-otp');
+  console.log('   POST /api/verify/check-otp');
+  console.log('   POST /api/verify/resend-otp');
   console.log('   GET  /api/debug/raw');
   console.log('══════════════════════════════════════════════════════');
 });
