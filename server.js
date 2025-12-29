@@ -885,6 +885,29 @@ app.post('/api/verify/check-otp', async (req, res) => {
   }
 });
 
+// Add this endpoint
+app.get('/api/auth/validate', async (req, res) => {
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.json({ success: false, error: 'No token' });
+  }
+  
+  // Simple token validation (in production, use JWT)
+  if (token.startsWith('villager-')) {
+    return res.json({ 
+      success: true, 
+      valid: true,
+      message: 'Token is valid' 
+    });
+  }
+  
+  return res.json({ 
+    success: false, 
+    valid: false,
+    error: 'Invalid token' 
+  });
+});
+
 // Resend OTP - MOBILE-ONLY
 app.post('/api/verify/resend-otp', async (req, res) => {
   try {
