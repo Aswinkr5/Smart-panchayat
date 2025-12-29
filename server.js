@@ -47,9 +47,13 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// Log all requests
+// Detailed request logging middleware
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  console.log('Headers:', JSON.stringify(req.headers));
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Body:', JSON.stringify(req.body));
+  }
   next();
 });
 
@@ -631,6 +635,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
+// ==================== MOBILE OTP VERIFICATION ====================
 
 // Check if phone number exists in database
 app.post('/api/verify/check-phone', async (req, res) => {
@@ -656,27 +661,43 @@ app.post('/api/verify/check-phone', async (req, res) => {
         |> last()
     `;
 
+    console.log('📊 Querying InfluxDB for phone:', phone);
     const phoneResult = await queryInfluxDB(query);
+    console.log('📊 Phone query result:', phoneResult);
 
     if (phoneResult.length === 0) {
+      console.log('❌ Phone not found in database');
       return res.json({
         success: false,
         error: 'Phone number not registered in our system'
       });
     }
 
-    // Get villager details using Aadhaar from phone result
     const aadhaarNumber = phoneResult[0].aadhaar_number;
+    console.log('📊 Found Aadhaar:', aadhaarNumber);
+    
     const villagerData = await getVillagerFields(aadhaarNumber);
+    console.log('📊 Villager data:', villagerData);
+    console.log('📊 Status:', villagerData?.status);
 
-    if (!villagerData || villagerData.status !== 'active') {
+    if (!villagerData) {
+      console.log('❌ No villager data found');
       return res.json({
         success: false,
-        error: 'Villager account is not active'
+        error: 'Villager data not found'
       });
     }
 
-    console.log(`✅ Phone found: ${phone} belongs to ${villagerData.name}`);
+    // TEMPORARY: Remove status check for testing
+    // if (!villagerData.status || villagerData.status !== 'active') {
+    //   console.log('⚠️ Status check failed:', villagerData.status);
+    //   return res.json({
+    //     success: false,
+    //     error: 'Villager account is not active. Status: ' + (villagerData.status || 'undefined')
+    //   });
+    // }
+
+    console.log(`✅ Phone verified: ${phone} belongs to ${villagerData.name}`);
 
     res.json({
       success: true,
@@ -700,14 +721,12 @@ app.post('/api/verify/check-phone', async (req, res) => {
   }
 });
 
-// ==================== OTP VERIFICATION ====================
-
-// Generate and send OTP (simulated) - UPDATED FOR MOBILE-ONLY
+// Generate and send OTP (simulated) - MOBILE-ONLY
 app.post('/api/verify/send-otp', async (req, res) => {
   try {
     const { phone } = req.body;
     
-    console.log('📱 SEND OTP request (mobile-only):', { phone });
+    console.log('📱 SEND OTP request:', { phone });
 
     if (!phone || phone.length !== 10) {
       return res.status(400).json({
@@ -726,7 +745,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
         |> last()
     `;
 
-    const phoneResult = await queryInfluxDB(query);
+    const phoneResult = await queryInfluxDB(phoneQuery);
 
     if (phoneResult.length === 0) {
       return res.status(404).json({
@@ -767,13 +786,13 @@ app.post('/api/verify/send-otp', async (req, res) => {
     });
   }
 });
-// Verify OTP
-// Verify OTP - UPDATED FOR MOBILE-ONLY
+
+// Verify OTP - MOBILE-ONLY
 app.post('/api/verify/check-otp', async (req, res) => {
   try {
     const { phone, otp } = req.body;
     
-    console.log('🔍 VERIFY OTP request (mobile-only):', { phone });
+    console.log('🔍 VERIFY OTP request:', { phone });
 
     if (!phone || !otp) {
       return res.status(400).json({
@@ -866,57 +885,40 @@ app.post('/api/verify/check-otp', async (req, res) => {
   }
 });
 
-// Resend OTP
+// Resend OTP - MOBILE-ONLY
 app.post('/api/verify/resend-otp', async (req, res) => {
   try {
-    const { aadhaarNumber, phone } = req.body;
+    const { phone } = req.body;
     
-    console.log('🔄 RESEND OTP request:', { aadhaarNumber });
+    console.log('🔄 RESEND OTP request:', { phone });
 
-    if (!aadhaarNumber || !phone) {
+    if (!phone) {
       return res.status(400).json({
         success: false,
-        error: 'Aadhaar number and phone are required'
+        error: 'Phone number is required'
       });
     }
 
     // Clear any existing OTP
-    otpStore.delete(aadhaarNumber);
-
-    // Call send OTP endpoint logic
-    const villagerData = await getVillagerFields(aadhaarNumber);
-    
-    if (!villagerData || villagerData.status !== 'active') {
-      return res.status(404).json({
-        success: false,
-        error: 'Villager not found'
-      });
-    }
-
-    if (villagerData.phone !== phone) {
-      return res.status(400).json({
-        success: false,
-        error: 'Phone number does not match our records'
-      });
-    }
+    otpStore.delete(phone);
 
     // Generate new OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
 
-    otpStore.set(aadhaarNumber, {
+    otpStore.set(phone, {
       otp,
       expiresAt,
       phone,
       attempts: 0
     });
 
-    console.log(`✅ New OTP ${otp} generated for ${aadhaarNumber}`);
+    console.log(`✅ New OTP ${otp} generated for ${phone}`);
 
     res.json({
       success: true,
       message: 'New OTP sent successfully',
-      otp: otp, // Remove this in production
+      otp: otp,
       test_mode: true
     });
 
@@ -997,22 +999,14 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log('🚀 Smart Panchayat Backend');
   console.log('══════════════════════════════════════════════════════');
-  console.log(`📡 Server: http://localhost:${PORT}`);
-  console.log(`🔧 API:    http://localhost:${PORT}/api`);
-  console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
+  console.log(`📡 Server running on port: ${PORT}`);
+  console.log(`🔧 API:    /api/*`);
+  console.log(`📱 Mobile: /api/verify/*`);
   console.log('══════════════════════════════════════════════════════');
   console.log('✅ Available API Endpoints:');
-  console.log('   GET  /api/test');
-  console.log('   GET  /api/health');
-  console.log('   GET  /api/villagers (with phone numbers)');
-  console.log('   POST /api/villagers');
-  console.log('   GET  /api/villagers/:aadhaarNumber');
-  console.log('   PUT  /api/villagers/:aadhaarNumber');
-  console.log('   DELETE /api/villagers/:aadhaarNumber');
-  console.log('   GET  /api/admin/dashboard (with phone numbers)');
+  console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
   console.log('   POST /api/verify/resend-otp');
-  console.log('   GET  /api/debug/raw');
   console.log('══════════════════════════════════════════════════════');
 });
