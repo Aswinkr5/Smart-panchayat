@@ -232,11 +232,15 @@
                                 <table class="table table-hover">
                                     <thead>
                                         <tr>
-                                          <th>DevEUI</th>
-                                          <th>Name</th>
-                                          <th>Latest Measurement</th>
+                                            <th>ID</th>
+                                            <th>Name</th>
+                                            <th>Type</th>
+                                            <th>Location</th>
+                                            <th>Unit</th>
+                                            <th>Status</th>
+                                            <th>Actions</th>
                                         </tr>
-                                      </thead>                                      
+                                    </thead>
                                     <tbody id="allSensorsTable">
                                         <!-- Populated by JavaScript -->
                                     </tbody>
@@ -320,17 +324,42 @@
                 <div class="modal-body">
                     <form id="sensorForm">
                         <div class="row">
-                          <div class="col-md-6 mb-3">
-                            <label class="form-label">Device EUI *</label>
-                            <input type="text" class="form-control" name="devEUI" required>
-                          </div>
-                          <div class="col-md-6 mb-3">
-                            <label class="form-label">Device Name *</label>
-                            <input type="text" class="form-control" name="deviceName" required>
-                          </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Sensor Name *</label>
+                                <input type="text" class="form-control" name="name" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Sensor Type *</label>
+                                <select class="form-select" name="type" required>
+                                    <option value="">Select Type</option>
+                                    <option value="water_quality">Water Quality</option>
+                                    <option value="air_quality">Air Quality</option>
+                                    <option value="temperature">Temperature</option>
+                                    <option value="humidity">Humidity</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Location *</label>
+                                <input type="text" class="form-control" name="location" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Unit</label>
+                                <input type="text" class="form-control" name="unit" placeholder="pH, AQI, °C, %">
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Normal Min Value</label>
+                                <input type="number" class="form-control" name="minNormal" step="0.1">
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Normal Max Value</label>
+                                <input type="number" class="form-control" name="maxNormal" step="0.1">
+                            </div>
                         </div>
                     </form>
-                      
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
