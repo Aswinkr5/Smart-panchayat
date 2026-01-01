@@ -190,11 +190,11 @@ app.get('/api/villagers', async (req, res) => {
     const [rows] = await db.query(
       `SELECT
          id,
-         adhbar AS aadhaar_number,
+         aadhaar AS aadhaar_number,
          name,
          phone,
          village,
-         anchopati AS panchayat,
+         panchayat,
          occupation,
          address,
          created_at
@@ -221,16 +221,16 @@ app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
     const [rows] = await db.query(
       `SELECT
          id,
-         adhbar AS aadhaar_number,
+         aadhaar AS aadhaar_number,
          name,
          phone,
          village,
-         anchopati AS panchayat,
+         panchayat,
          occupation,
          address,
          created_at
        FROM villagers
-       WHERE adhbar = ?`,
+       WHERE aadhaar = ?`,
       [aadhaarNumber]
     );
 
@@ -254,7 +254,7 @@ app.post('/api/villagers', async (req, res) => {
     }
 
     await db.query(
-      `INSERT INTO villagers (adhbar, name, phone, village, anchopati, occupation, address)
+      `INSERT INTO villagers (aadhaar, name, phone, village, panchayat, occupation, address)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [aadhaarNumber, name, phone, village, panchayat, occupation, address]
     );
@@ -276,8 +276,8 @@ app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
 
     const [result] = await db.query(
       `UPDATE villagers
-       SET name = ?, phone = ?, village = ?, anchopati = ?, occupation = ?, address = ?
-       WHERE adhbar = ?`,
+       SET name = ?, phone = ?, village = ?, panchayat = ?, occupation = ?, address = ?
+       WHERE aadhaar = ?`,
       [name, phone, village, panchayat, occupation, address, aadhaarNumber]
     );
 
@@ -297,7 +297,7 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
     const { aadhaarNumber } = req.params;
 
     const [result] = await db.query(
-      `DELETE FROM villagers WHERE adhbar = ?`,
+      `DELETE FROM villagers WHERE aadhaar = ?`,
       [aadhaarNumber]
     );
 
@@ -318,8 +318,8 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
     // Get villager
     const [[villager]] = await db.query(
-      `SELECT id, name, adhbar AS aadhaar, phone, village
-       FROM villagers WHERE adhbar = ?`,
+      `SELECT id, name, aadhaar, phone, village, panchayat
+       FROM villagers WHERE aadhaar = ?`,
       [aadhaar]
     );
 
@@ -332,7 +332,7 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
     // Get mapped sensors
     const [sensors] = await db.query(
-      `SELECT s.id, s.devEUI, s.name
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
        FROM sensors s
        JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE vs.villager_id = ?`,
@@ -368,6 +368,8 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
       result.push({
         devEUI: sensor.devEUI,
         name: sensor.name,
+        village: sensor.village,
+        panchayat: sensor.panchayat,
         measurement,
         time,
         status
@@ -395,7 +397,7 @@ app.get('/api/sensors', async (req, res) => {
   try {
     // Get sensor metadata from MySQL
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, village, anchopati AS panchayat
+      `SELECT id, devEUI, name, village, panchayat
        FROM sensors
        ORDER BY id DESC`
     );
@@ -454,8 +456,8 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
     const { devEUI } = req.params;
 
     const [rows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.anchopati AS panchayat,
-              v.phone
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat,
+              v.phone, v.name AS villager_name, v.aadhaar
        FROM sensors s
        LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
        LEFT JOIN villagers v ON v.id = vs.villager_id
@@ -500,7 +502,7 @@ app.post('/api/sensors', async (req, res) => {
 
     // Insert sensor
     const [sensorResult] = await conn.query(
-      `INSERT INTO sensors (devEUI, name, village, anchopati)
+      `INSERT INTO sensors (devEUI, name, village, panchayat)
        VALUES (?, ?, ?, ?)`,
       [devEUI, deviceName, village || null, panchayat || null]
     );
@@ -564,7 +566,7 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
     // Update sensor metadata
     const [result] = await conn.query(
       `UPDATE sensors
-       SET name = ?, village = ?, anchopati = ?
+       SET name = ?, village = ?, panchayat = ?
        WHERE devEUI = ?`,
       [deviceName, village || null, panchayat || null, devEUI]
     );
@@ -680,13 +682,47 @@ app.get('/api/admin/dashboard', async (req, res) => {
     const [recentVillagers] = await db.query(
       `SELECT
          name,
-         adhbar AS aadhaar_number,
+         aadhaar AS aadhaar_number,
          village,
-         phone
+         phone,
+         panchayat
        FROM villagers
        ORDER BY created_at DESC
        LIMIT 5`
     );
+
+    // Get recent sensors with status
+    const [sensorRows] = await db.query(
+      `SELECT devEUI, name, village, panchayat FROM sensors ORDER BY installed_at DESC LIMIT 5`
+    );
+
+    const recentSensors = [];
+    for (const sensor of sensorRows) {
+      const flux = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
+
+      const data = await queryInfluxDB(flux);
+      let status = 'Offline';
+      
+      if (data.length > 0) {
+        const t = new Date(data[0]._time);
+        status = (Date.now() - t.getTime()) / 1000 <= 22 ? 'Live' : 'Offline';
+      }
+
+      recentSensors.push({
+        devEUI: sensor.devEUI,
+        name: sensor.name,
+        village: sensor.village,
+        panchayat: sensor.panchayat,
+        status
+      });
+    }
 
     res.json({
       success: true,
@@ -698,7 +734,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
           activeAlerts: 0
         },
         recentVillagers,
-        recentSensors: []
+        recentSensors
       }
     });
   } catch (error) {
@@ -737,8 +773,8 @@ app.post('/api/login', async (req, res) => {
   // Check if villager exists
   try {
     const [rows] = await db.query(
-      `SELECT name, phone, village, anchopati AS panchayat
-       FROM villagers WHERE adhbar = ?`,
+      `SELECT name, phone, village, panchayat
+       FROM villagers WHERE aadhaar = ?`,
       [aadhaarNumber]
     );
 
@@ -785,7 +821,7 @@ app.post('/api/verify/check-phone', async (req, res) => {
 
     // Query MySQL for phone number
     const [rows] = await db.query(
-      `SELECT id, adhbar AS aadhaar_number, name, village, anchopati AS panchayat
+      `SELECT id, aadhaar, name, village, panchayat
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -805,7 +841,8 @@ app.post('/api/verify/check-phone', async (req, res) => {
       success: true,
       message: 'Phone number verified',
       villager: {
-        aadhaar_number: villager.aadhaar_number,
+        id: villager.id,
+        aadhaar_number: villager.aadhaar,
         name: villager.name,
         phone: phone,
         village: villager.village,
@@ -838,7 +875,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
 
     // First check if phone exists
     const [rows] = await db.query(
-      `SELECT adhbar AS aadhaar_number FROM villagers WHERE phone = ?`,
+      `SELECT aadhaar FROM villagers WHERE phone = ?`,
       [phone]
     );
 
@@ -849,7 +886,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
       });
     }
 
-    const aadhaarNumber = rows[0].aadhaar_number;
+    const aadhaarNumber = rows[0].aadhaar;
 
     // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -935,7 +972,7 @@ app.post('/api/verify/check-otp', async (req, res) => {
 
     // OTP is correct - get villager data
     const [rows] = await db.query(
-      `SELECT adhbar AS aadhaar_number, name, village, anchopati AS panchayat
+      `SELECT aadhaar, name, village, panchayat
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -962,7 +999,7 @@ app.post('/api/verify/check-otp', async (req, res) => {
       token: token,
       user: {
         name: villager.name,
-        aadhaar_number: villager.aadhaar_number,
+        aadhaar_number: villager.aadhaar,
         phone: phone,
         village: villager.village,
         panchayat: villager.panchayat,
