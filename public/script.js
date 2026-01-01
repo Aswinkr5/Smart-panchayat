@@ -1,4 +1,4 @@
-const API_BASE = 'https://smart-panchayath.onrender.com/api';
+const API_BASE = 'https://smart-panchayat.onrender.com/api';
 console.log('API Base:', API_BASE);
 
 console.log('Mobile Debug Info:');
