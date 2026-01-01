@@ -2,10 +2,23 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
-const mysql = require('mysql2/promise');
+
 const path = require('path');
 const app = express();
+// Try this alternative import
+const mysql = require('mysql2');
 
+// Or this if you want promise API
+const mysql = require('mysql2/promise');
+
+// If both fail, try
+try {
+    const mysql = require('mysql2');
+} catch (e) {
+    console.error('mysql2 not found, trying alternative...');
+    // Fallback or exit
+    process.exit(1);
+}
 // ==================== DATABASE CONFIGURATIONS ====================
 
 // InfluxDB Configuration
