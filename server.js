@@ -2,23 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
-
 const path = require('path');
 const app = express();
-// Try this alternative import
-const mysql = require('mysql2');
 
-// Or this if you want promise API
-//const mysql = require('mysql2/promise');
-
-// If both fail, try
-try {
-    const mysql = require('mysql2');
-} catch (e) {
-    console.error('mysql2 not found, trying alternative...');
-    // Fallback or exit
-    process.exit(1);
-}
 // ==================== DATABASE CONFIGURATIONS ====================
 
 // InfluxDB Configuration
@@ -36,7 +22,8 @@ const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.tok
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// MySQL Configuration
+// MySQL Configuration - Use promise wrapper
+const mysql = require('mysql2');
 const db = mysql.createPool({
   host: process.env.MYSQL_HOST,
   user: process.env.MYSQL_USER,
@@ -46,7 +33,7 @@ const db = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
-});
+}).promise(); // ADD .promise() HERE
 
 // ==================== OTP STORE ====================
 const otpStore = new Map();
@@ -80,6 +67,7 @@ app.use((req, res, next) => {
   }
   next();
 });
+
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -1214,4 +1202,3 @@ app.listen(PORT, () => {
   console.log('   POST /api/verify/resend-otp');
   console.log('══════════════════════════════════════════════════════');
 });
-
