@@ -9,7 +9,7 @@ const app = express();
 const mysql = require('mysql2');
 
 // Or this if you want promise API
-const mysql = require('mysql2/promise');
+//const mysql = require('mysql2/promise');
 
 // If both fail, try
 try {
@@ -1214,3 +1214,4 @@ app.listen(PORT, () => {
   console.log('   POST /api/verify/resend-otp');
   console.log('══════════════════════════════════════════════════════');
 });
+
