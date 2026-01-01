@@ -1,4 +1,5 @@
 const API_BASE_URL = 'https://smart-panchayat.onrender.com';
+const mysql = require('mysql2/promise');
 const API_BASE = API_BASE_URL + '/api';
 console.log('API Base:', API_BASE);
 
