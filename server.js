@@ -68,7 +68,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // ==================== HELPER FUNCTIONS ====================
 
 // Query InfluxDB helper
@@ -147,6 +146,75 @@ async function getActiveSensors() {
   return Array.from(unique);
 }
 
+// ==================== AUTHENTICATION HELPER ====================
+
+// Simple authentication middleware
+const requireAuth = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  
+  if (!authHeader) {
+    // Allow public endpoints
+    const publicEndpoints = [
+      '/api/test',
+      '/api/health',
+      '/api/login',
+      '/api/verify/check-phone',
+      '/api/verify/send-otp',
+      '/api/verify/check-otp',
+      '/api/verify/resend-otp',
+      '/api/debug'
+    ];
+    
+    if (publicEndpoints.some(endpoint => req.path.startsWith(endpoint))) {
+      return next();
+    }
+    
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Authentication token required' 
+    });
+  }
+  
+  // Extract token (remove 'Bearer ' if present)
+  const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+  
+  // Store token in request for later use
+  req.token = token;
+  next();
+};
+
+// Helper to parse user from token
+function getUserFromToken(token) {
+  if (!token) return { role: 'unknown' };
+  
+  try {
+    // Check if it's an admin token
+    if (token.startsWith('token-')) {
+      return { role: 'admin' };
+    }
+    
+    // Check if it's a villager token (villager-<timestamp>-<phone>-<id>)
+    if (token.startsWith('villager-')) {
+      const parts = token.split('-');
+      if (parts.length >= 4) {
+        const villagerId = parseInt(parts[3]);
+        if (!isNaN(villagerId)) {
+          return {
+            role: 'villager',
+            id: villagerId,
+            phone: parts[2],
+            timestamp: parts[1]
+          };
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error parsing token:', error);
+  }
+  
+  return { role: 'unknown' };
+}
+
 // ==================== API ROUTES ====================
 
 // Test endpoint
@@ -185,9 +253,19 @@ app.get('/api/health', async (req, res) => {
 
 // ==================== VILLAGER MANAGEMENT (MySQL) ====================
 
-// Get all villagers
-app.get('/api/villagers', async (req, res) => {
+// Get all villagers (admin only)
+app.get('/api/villagers', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
+    
+    // Only admin can access all villagers
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin only.'
+      });
+    }
+
     const [rows] = await db.query(
       `SELECT
          id,
@@ -214,10 +292,19 @@ app.get('/api/villagers', async (req, res) => {
   }
 });
 
-// Get a specific villager
-app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
+// Get a specific villager (admin only)
+app.get('/api/villagers/:aadhaarNumber', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
     const { aadhaarNumber } = req.params;
+
+    // Only admin can access specific villagers
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin only.'
+      });
+    }
 
     const [rows] = await db.query(
       `SELECT
@@ -245,9 +332,19 @@ app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// Add new villager
-app.post('/api/villagers', async (req, res) => {
+// Add new villager (admin only)
+app.post('/api/villagers', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
+    
+    // Only admin can add villagers
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin only.'
+      });
+    }
+
     const { aadhaarNumber, name, phone, village, panchayat, occupation, address } = req.body;
 
     if (!aadhaarNumber || !name || !phone || !village || !panchayat) {
@@ -269,10 +366,20 @@ app.post('/api/villagers', async (req, res) => {
   }
 });
 
-// Update a villager
-app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
+// Update a villager (admin only)
+app.put('/api/villagers/:aadhaarNumber', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
     const { aadhaarNumber } = req.params;
+    
+    // Only admin can update villagers
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin only.'
+      });
+    }
+
     const { name, phone, village, panchayat, occupation, address } = req.body;
 
     const [result] = await db.query(
@@ -292,10 +399,19 @@ app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// Delete a villager
-app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
+// Delete a villager (admin only)
+app.delete('/api/villagers/:aadhaarNumber', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
     const { aadhaarNumber } = req.params;
+    
+    // Only admin can delete villagers
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin only.'
+      });
+    }
 
     const [result] = await db.query(
       `DELETE FROM villagers WHERE aadhaar = ?`,
@@ -312,10 +428,19 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// Get sensors for a specific villager
-app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
+// Get sensors for a specific villager (admin only)
+app.get('/api/villagers/:aadhaar/sensors', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
     const { aadhaar } = req.params;
+    
+    // Only admin can view villager sensors
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin only.'
+      });
+    }
 
     // Get villager
     const [[villager]] = await db.query(
@@ -393,83 +518,317 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
 // ==================== SENSOR MANAGEMENT ====================
 
-// Get all sensors
-app.get('/api/sensors', async (req, res) => {
+// Get all sensors - FIXED: Villagers only see their sensors
+app.get('/api/sensors', requireAuth, async (req, res) => {
   try {
-    // Get sensor metadata from MySQL
-    const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, village, panchayat
-       FROM sensors
-       ORDER BY id DESC`
-    );
+    const user = getUserFromToken(req.token);
+    
+    if (user.role === 'villager') {
+      // Villager can only see sensors mapped to them
+      if (!user.id) {
+        console.error('❌ Villager ID not found in token:', req.token);
+        return res.status(403).json({ 
+          success: false, 
+          error: 'Invalid token. Please login again.' 
+        });
+      }
+      
+      console.log(`🔍 Fetching sensors for villager ID: ${user.id}`);
+      
+      // Get sensors mapped to this villager
+      const [sensorRows] = await db.query(
+        `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+         FROM sensors s
+         INNER JOIN villager_sensors vs ON vs.sensor_id = s.id
+         WHERE vs.villager_id = ?
+         ORDER BY s.id DESC`,
+        [user.id]
+      );
+      
+      console.log(`✅ Found ${sensorRows.length} sensors for villager ${user.id}`);
+      
+      const sensors = [];
 
-    const sensors = [];
+      // For each sensor, get latest measurement from InfluxDB
+      for (const sensor of sensorRows) {
+        const { devEUI, name, village, panchayat } = sensor;
 
-    // For each sensor, get latest measurement from InfluxDB
-    for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat } = sensor;
+        const dataQuery = `
+          from(bucket: "${INFLUX_CONFIG.bucket}")
+            |> range(start: -1h)
+            |> filter(fn: (r) => r._measurement == "sensor_data")
+            |> filter(fn: (r) => r.devEUI == "${devEUI}")
+            |> sort(columns: ["_time"], desc: true)
+            |> limit(n: 1)
+        `;
 
-      const dataQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -1h)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
-      `;
+        const data = await queryInfluxDB(dataQuery);
 
-      const data = await queryInfluxDB(dataQuery);
+        let latestValue = 'No data';
+        let latestTime = '';
+        let status = 'Offline';
 
-      let latestValue = 'No data';
-      let latestTime = '';
-      let status = 'Offline';
+        if (data.length > 0) {
+          latestValue = `${data[0]._field}: ${data[0]._value}`;
+          const t = new Date(data[0]._time);
+          latestTime = t.toLocaleString();
+          const now = new Date();
+          const diffSeconds = (now - t) / 1000;
+          status = diffSeconds <= 22 ? 'Live' : 'Offline';
+        }
 
-      if (data.length > 0) {
-        latestValue = `${data[0]._field}: ${data[0]._value}`;
-        const t = new Date(data[0]._time);
-        latestTime = t.toLocaleString();
-        const now = new Date();
-        const diffSeconds = (now - t) / 1000;
-        status = diffSeconds <= 22 ? 'Live' : 'Offline';
+        sensors.push({
+          devEUI,
+          name,
+          village,
+          panchayat,
+          measurement: latestValue,
+          time: latestTime,
+          status,
+          isMine: true
+        });
       }
 
-      sensors.push({
-        devEUI,
-        name,
-        village,
-        panchayat,
-        measurement: latestValue,
-        time: latestTime,
-        status
+      res.json({ 
+        success: true, 
+        sensors,
+        count: sensors.length,
+        message: `Showing ${sensors.length} sensors mapped to you`
+      });
+      
+    } else if (user.role === 'admin') {
+      // Admin can see all sensors
+      console.log('👑 Admin accessing all sensors');
+      
+      const [sensorRows] = await db.query(
+        `SELECT id, devEUI, name, village, panchayat
+         FROM sensors
+         ORDER BY id DESC`
+      );
+
+      console.log(`📊 Total sensors in system: ${sensorRows.length}`);
+
+      const sensors = [];
+
+      // For each sensor, get latest measurement from InfluxDB
+      for (const sensor of sensorRows) {
+        const { devEUI, name, village, panchayat } = sensor;
+
+        const dataQuery = `
+          from(bucket: "${INFLUX_CONFIG.bucket}")
+            |> range(start: -1h)
+            |> filter(fn: (r) => r._measurement == "sensor_data")
+            |> filter(fn: (r) => r.devEUI == "${devEUI}")
+            |> sort(columns: ["_time"], desc: true)
+            |> limit(n: 1)
+        `;
+
+        const data = await queryInfluxDB(dataQuery);
+
+        let latestValue = 'No data';
+        let latestTime = '';
+        let status = 'Offline';
+
+        if (data.length > 0) {
+          latestValue = `${data[0]._field}: ${data[0]._value}`;
+          const t = new Date(data[0]._time);
+          latestTime = t.toLocaleString();
+          const now = new Date();
+          const diffSeconds = (now - t) / 1000;
+          status = diffSeconds <= 22 ? 'Live' : 'Offline';
+        }
+
+        sensors.push({
+          devEUI,
+          name,
+          village,
+          panchayat,
+          measurement: latestValue,
+          time: latestTime,
+          status
+        });
+      }
+
+      res.json({ 
+        success: true, 
+        sensors,
+        count: sensors.length,
+        message: `Showing all ${sensors.length} sensors in the system`
+      });
+    } else {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Invalid token.'
       });
     }
-
-    res.json({ success: true, sensors });
   } catch (err) {
     console.error('❌ Error fetching sensors:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Get single sensor
-app.get('/api/sensors/:devEUI', async (req, res) => {
+// Get villager's own sensors (optimized for mobile app)
+app.get('/api/my-sensors', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
+    
+    if (user.role !== 'villager') {
+      return res.status(403).json({
+        success: false,
+        error: 'This endpoint is for villagers only'
+      });
+    }
+    
+    if (!user.id) {
+      console.error('❌ Villager ID missing in token:', req.token);
+      return res.status(403).json({
+        success: false,
+        error: 'Invalid token. Please login again.'
+      });
+    }
+
+    // Get villager info
+    const [[villager]] = await db.query(
+      `SELECT id, name, aadhaar, phone, village, panchayat
+       FROM villagers WHERE id = ?`,
+      [user.id]
+    );
+
+    if (!villager) {
+      return res.status(404).json({
+        success: false,
+        error: 'Villager not found in database'
+      });
+    }
+
+    console.log(`👤 Villager found: ${villager.name} (ID: ${villager.id})`);
+
+    // Get sensors mapped to this villager
+    const [sensors] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+       FROM sensors s
+       INNER JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE vs.villager_id = ?
+       ORDER BY s.id DESC`,
+      [user.id]
+    );
+
+    console.log(`📡 Found ${sensors.length} sensors for villager ${user.id}`);
+
+    const result = [];
+
+    // Fetch latest measurement from InfluxDB for each sensor
+    for (const sensor of sensors) {
+      const flux = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
+
+      const data = await queryInfluxDB(flux);
+
+      let measurement = 'No data';
+      let time = '';
+      let status = 'Offline';
+      let value = null;
+      let field = null;
+
+      if (data.length > 0) {
+        measurement = `${data[0]._field}: ${data[0]._value}`;
+        value = data[0]._value;
+        field = data[0]._field;
+        const t = new Date(data[0]._time);
+        time = t.toLocaleString();
+        status = (Date.now() - t.getTime()) / 1000 <= 22 ? 'Live' : 'Offline';
+      }
+
+      result.push({
+        devEUI: sensor.devEUI,
+        name: sensor.name,
+        village: sensor.village,
+        panchayat: sensor.panchayat,
+        measurement,
+        value,
+        field,
+        time,
+        status,
+        isMine: true
+      });
+    }
+
+    res.json({
+      success: true,
+      villager: {
+        name: villager.name,
+        aadhaar: villager.aadhaar,
+        phone: villager.phone,
+        village: villager.village,
+        panchayat: villager.panchayat
+      },
+      sensors: result,
+      count: result.length,
+      message: `You have ${result.length} sensor(s)`
+    });
+  } catch (err) {
+    console.error('❌ Error fetching villager sensors:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// Get single sensor (with role-based access)
+app.get('/api/sensors/:devEUI', requireAuth, async (req, res) => {
+  try {
+    const user = getUserFromToken(req.token);
     const { devEUI } = req.params;
 
-    const [rows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat,
-              v.phone, v.name AS villager_name, v.aadhaar
-       FROM sensors s
-       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-       LEFT JOIN villagers v ON v.id = vs.villager_id
-       WHERE s.devEUI = ?`,
-      [devEUI]
-    );
+    let query = '';
+    let queryParams = [devEUI];
+    
+    if (user.role === 'villager') {
+      // Villager can only see sensors mapped to them
+      if (!user.id) {
+        return res.status(403).json({ 
+          success: false, 
+          error: 'Villager ID not found in token' 
+        });
+      }
+      
+      query = `
+        SELECT s.id, s.devEUI, s.name, s.village, s.panchayat,
+               v.phone, v.name AS villager_name, v.aadhaar
+         FROM sensors s
+         INNER JOIN villager_sensors vs ON vs.sensor_id = s.id
+         INNER JOIN villagers v ON v.id = vs.villager_id
+         WHERE s.devEUI = ? AND v.id = ?`;
+      queryParams = [devEUI, user.id];
+    } else if (user.role === 'admin') {
+      // Admin can see any sensor
+      query = `
+        SELECT s.id, s.devEUI, s.name, s.village, s.panchayat,
+               v.phone, v.name AS villager_name, v.aadhaar
+         FROM sensors s
+         LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+         LEFT JOIN villagers v ON v.id = vs.villager_id
+         WHERE s.devEUI = ?`;
+    } else {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    const [rows] = await db.query(query, queryParams);
 
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
-        error: 'Sensor not found'
+        error: user.role === 'villager' ? 'Sensor not found or not mapped to you' : 'Sensor not found'
       });
     }
 
@@ -486,8 +845,18 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// Add new sensor
-app.post('/api/sensors', async (req, res) => {
+// Add new sensor (admin only)
+app.post('/api/sensors', requireAuth, async (req, res) => {
+  const user = getUserFromToken(req.token);
+  
+  // Only admin can add sensors
+  if (user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Access denied. Admin only.'
+    });
+  }
+
   const { devEUI, deviceName, village, panchayat, phone } = req.body;
 
   if (!devEUI || !deviceName) {
@@ -555,8 +924,18 @@ app.post('/api/sensors', async (req, res) => {
   }
 });
 
-// Update sensor
-app.put('/api/sensors/:devEUI', async (req, res) => {
+// Update sensor (admin only)
+app.put('/api/sensors/:devEUI', requireAuth, async (req, res) => {
+  const user = getUserFromToken(req.token);
+  
+  // Only admin can update sensors
+  if (user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Access denied. Admin only.'
+    });
+  }
+
   const { devEUI } = req.params;
   const { deviceName, village, panchayat, phone } = req.body;
 
@@ -610,8 +989,18 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// Delete sensor
-app.delete('/api/sensors/:devEUI', async (req, res) => {
+// Delete sensor (admin only)
+app.delete('/api/sensors/:devEUI', requireAuth, async (req, res) => {
+  const user = getUserFromToken(req.token);
+  
+  // Only admin can delete sensors
+  if (user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Access denied. Admin only.'
+    });
+  }
+
   const { devEUI } = req.params;
 
   if (!devEUI) {
@@ -669,8 +1058,18 @@ app.delete('/api/sensors/:devEUI', async (req, res) => {
 
 // ==================== ADMIN DASHBOARD ====================
 
-app.get('/api/admin/dashboard', async (req, res) => {
+app.get('/api/admin/dashboard', requireAuth, async (req, res) => {
   try {
+    const user = getUserFromToken(req.token);
+    
+    // Only admin can access dashboard
+    if (user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied. Admin dashboard only.'
+      });
+    }
+
     // Get statistics from MySQL
     const [[{ totalVillagers }]] = await db.query(
       `SELECT COUNT(*) AS totalVillagers FROM villagers`
@@ -760,9 +1159,12 @@ app.post('/api/login', async (req, res) => {
   const isAdmin = aadhaarNumber === '999999999999';
 
   if (isAdmin) {
+    const token = 'token-' + Date.now();
+    console.log('👑 Admin login token:', token);
+    
     return res.json({
       success: true,
-      token: 'token-' + Date.now(),
+      token: token,
       user: {
         name: 'Admin User',
         aadhaarNumber: aadhaarNumber,
@@ -774,7 +1176,7 @@ app.post('/api/login', async (req, res) => {
   // Check if villager exists
   try {
     const [rows] = await db.query(
-      `SELECT name, phone, village, panchayat
+      `SELECT id, name, phone, village, panchayat
        FROM villagers WHERE aadhaar = ?`,
       [aadhaarNumber]
     );
@@ -786,19 +1188,33 @@ app.post('/api/login', async (req, res) => {
       });
     }
 
+    const villager = rows[0];
+    
+    // Generate token with villager ID
+    const token = 'villager-' + Date.now() + '-' + villager.phone + '-' + villager.id;
+    
+    console.log('✅ Villager login token:', token);
+    console.log('📋 Token breakdown:', {
+      timestamp: Date.now(),
+      phone: villager.phone,
+      id: villager.id
+    });
+    
     res.json({
       success: true,
-      token: 'villager-' + Date.now(),
+      token: token,
       user: {
-        name: rows[0].name,
+        id: villager.id,
+        name: villager.name,
         aadhaarNumber: aadhaarNumber,
-        phone: rows[0].phone,
-        village: rows[0].village,
-        panchayat: rows[0].panchayat,
+        phone: villager.phone,
+        village: villager.village,
+        panchayat: villager.panchayat,
         role: 'villager'
       }
     });
   } catch (err) {
+    console.error('❌ Login error:', err);
     res.status(500).json({
       success: false,
       error: err.message
@@ -876,7 +1292,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
 
     // First check if phone exists
     const [rows] = await db.query(
-      `SELECT aadhaar FROM villagers WHERE phone = ?`,
+      `SELECT id, aadhaar FROM villagers WHERE phone = ?`,
       [phone]
     );
 
@@ -887,7 +1303,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
       });
     }
 
-    const aadhaarNumber = rows[0].aadhaar;
+    const villager = rows[0];
 
     // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -898,11 +1314,12 @@ app.post('/api/verify/send-otp', async (req, res) => {
       otp,
       expiresAt,
       phone,
-      aadhaarNumber,
+      villagerId: villager.id,
+      aadhaarNumber: villager.aadhaar,
       attempts: 0
     });
 
-    console.log(`✅ OTP ${otp} generated for phone ${phone}`);
+    console.log(`✅ OTP ${otp} generated for phone ${phone}, villager ID: ${villager.id}`);
 
     res.json({
       success: true,
@@ -971,9 +1388,9 @@ app.post('/api/verify/check-otp', async (req, res) => {
       });
     }
 
-    // OTP is correct - get villager data
+    // OTP is correct - get villager data with ID
     const [rows] = await db.query(
-      `SELECT aadhaar, name, village, panchayat
+      `SELECT id, aadhaar, name, village, panchayat
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -987,18 +1404,21 @@ app.post('/api/verify/check-otp', async (req, res) => {
 
     const villager = rows[0];
 
-    // Generate token
-    const token = 'villager-' + Date.now() + '-' + phone;
+    // Generate token with villager ID
+    const token = 'villager-' + Date.now() + '-' + phone + '-' + villager.id;
+    
+    console.log('✅ OTP verified. Generated token:', token);
 
     // Clear OTP after successful verification
     otpStore.delete(phone);
 
-    console.log(`✅ OTP verified for phone ${phone}`);
+    console.log(`✅ OTP verified for phone ${phone}, villager ID: ${villager.id}`);
 
     res.json({
       success: true,
       token: token,
       user: {
+        id: villager.id,
         name: villager.name,
         aadhaar_number: villager.aadhaar,
         phone: phone,
@@ -1039,6 +1459,21 @@ app.post('/api/verify/resend-otp', async (req, res) => {
     // Clear any existing OTP
     otpStore.delete(phone);
 
+    // Get villager ID for the phone
+    const [rows] = await db.query(
+      `SELECT id, aadhaar FROM villagers WHERE phone = ?`,
+      [phone]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Phone number not registered'
+      });
+    }
+
+    const villager = rows[0];
+
     // Generate new OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
@@ -1047,10 +1482,12 @@ app.post('/api/verify/resend-otp', async (req, res) => {
       otp,
       expiresAt,
       phone,
+      villagerId: villager.id,
+      aadhaarNumber: villager.aadhaar,
       attempts: 0
     });
 
-    console.log(`✅ New OTP ${otp} generated for ${phone}`);
+    console.log(`✅ New OTP ${otp} generated for ${phone}, villager ID: ${villager.id}`);
 
     res.json({
       success: true,
@@ -1068,25 +1505,24 @@ app.post('/api/verify/resend-otp', async (req, res) => {
 });
 
 // Validate token
-app.get('/api/auth/validate', async (req, res) => {
-  const token = req.headers.authorization;
-  if (!token) {
-    return res.json({ success: false, error: 'No token' });
-  }
-
-  // Simple token validation
-  if (token.startsWith('villager-') || token.startsWith('token-')) {
-    return res.json({
-      success: true,
-      valid: true,
-      message: 'Token is valid'
+app.get('/api/auth/validate', requireAuth, async (req, res) => {
+  const user = getUserFromToken(req.token);
+  
+  console.log('🔐 Token validation request:', { token: req.token, user });
+  
+  if (user.role === 'unknown') {
+    return res.status(401).json({
+      success: false,
+      valid: false,
+      error: 'Invalid token'
     });
   }
-
+  
   return res.json({
-    success: false,
-    valid: false,
-    error: 'Invalid token'
+    success: true,
+    valid: true,
+    user: user,
+    message: 'Token is valid'
   });
 });
 
@@ -1190,15 +1626,28 @@ app.listen(PORT, () => {
   console.log(`📡 Server running on port: ${PORT}`);
   console.log(`🔧 API:    /api/*`);
   console.log(`📱 Mobile: /api/verify/*`);
+  console.log(`✨ New:    /api/my-sensors (for villagers)`);
   console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
   console.log('══════════════════════════════════════════════════════');
   console.log('✅ Available API Endpoints:');
-  console.log('   GET  /api/villagers');
-  console.log('   GET  /api/sensors');
-  console.log('   GET  /api/admin/dashboard');
+  console.log('   GET  /api/villagers          (Admin only)');
+  console.log('   GET  /api/sensors            (Role-based)');
+  console.log('   GET  /api/my-sensors         (Villagers only)');
+  console.log('   GET  /api/admin/dashboard    (Admin only)');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
   console.log('   POST /api/verify/resend-otp');
+  console.log('══════════════════════════════════════════════════════');
+  console.log('🔐 Authentication:');
+  console.log('   • Villagers can only see their own sensors');
+  console.log('   • Admins can see all sensors');
+  console.log('   • Use /api/my-sensors for villager mobile app');
+  console.log('   • Token format: villager-<timestamp>-<phone>-<id>');
+  console.log('══════════════════════════════════════════════════════');
+  console.log('🔧 Testing:');
+  console.log('   1. Admin login: Aadhaar 999999999999');
+  console.log('   2. Villager login: OTP verification');
+  console.log('   3. Check /api/auth/validate to verify token');
   console.log('══════════════════════════════════════════════════════');
 });
