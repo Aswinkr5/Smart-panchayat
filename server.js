@@ -62,12 +62,12 @@ app.use(express.json());
 
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  console.log('🔑 Authorization header:', req.headers['authorization'] ? 'Present' : 'Missing');
   if (req.body && Object.keys(req.body).length > 0) {
     console.log('Body:', JSON.stringify(req.body));
   }
   next();
 });
+
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -145,52 +145,6 @@ async function getActiveSensors() {
   const rows = await queryInfluxDB(query);
   const unique = new Set(rows.map(r => r.devEUI));
   return Array.from(unique);
-}
-
-// ==================== AUTHENTICATION HELPER ====================
-
-// Helper to parse user from token
-function getUserFromToken(authHeader) {
-  console.log('🔍 Parsing token from header:', authHeader);
-  
-  if (!authHeader) {
-    console.log('📭 No authorization header');
-    return { role: 'guest' };
-  }
-  
-  try {
-    // Extract token (remove 'Bearer ' if present)
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    console.log('🔑 Extracted token:', token);
-    
-    // Check if it's a villager token (villager-<timestamp>-<phone>)
-    if (token.startsWith('villager-')) {
-      const parts = token.split('-');
-      console.log('👤 Villager token parts:', parts);
-      
-      if (parts.length >= 3) {
-        const phone = parts[2];
-        console.log(`✅ Villager phone parsed: ${phone}`);
-        return {
-          role: 'villager',
-          phone: phone,
-          token: token
-        };
-      }
-      console.log('❌ Villager token format incorrect');
-    }
-    
-    // Check if it's an admin token
-    if (token.startsWith('token-')) {
-      console.log('👑 Admin token detected');
-      return { role: 'admin', token: token };
-    }
-  } catch (error) {
-    console.error('❌ Error parsing token:', error);
-  }
-  
-  console.log('👤 Returning guest role');
-  return { role: 'guest' };
 }
 
 // ==================== API ROUTES ====================
@@ -439,155 +393,58 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
 // ==================== SENSOR MANAGEMENT ====================
 
-// Get all sensors - MODIFIED: Mobile app needs token to see only their sensors
+// Get all sensors (ADMIN ONLY - shows all sensors)
 app.get('/api/sensors', async (req, res) => {
   try {
-    const user = getUserFromToken(req.headers['authorization']);
-    console.log('🔍 GET /api/sensors - User role:', user.role);
-    
-    if (user.role === 'villager') {
-      // Mobile app request - show only sensors mapped to this villager
-      console.log('📱 Mobile app request detected for villager phone:', user.phone);
-      
-      // First, get villager ID from phone
-      const [[villager]] = await db.query(
-        `SELECT id FROM villagers WHERE phone = ?`,
-        [user.phone]
-      );
-      
-      if (!villager) {
-        console.log('❌ Villager not found for phone:', user.phone);
-        return res.status(404).json({
-          success: false,
-          error: 'Villager not found. Please login again.'
-        });
-      }
-      
-      console.log(`✅ Villager found: ID ${villager.id} for phone ${user.phone}`);
-      
-      // Get sensors mapped to this villager
-      const [sensorRows] = await db.query(
-        `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
-         FROM sensors s
-         INNER JOIN villager_sensors vs ON vs.sensor_id = s.id
-         WHERE vs.villager_id = ?
-         ORDER BY s.id DESC`,
-        [villager.id]
-      );
-      
-      console.log(`✅ Found ${sensorRows.length} sensors for villager ${villager.id}`);
-      
-      const sensors = [];
+    // Get sensor metadata from MySQL
+    const [sensorRows] = await db.query(
+      `SELECT id, devEUI, name, village, panchayat
+       FROM sensors
+       ORDER BY id DESC`
+    );
 
-      // For each sensor, get latest measurement from InfluxDB
-      for (const sensor of sensorRows) {
-        const { devEUI, name, village, panchayat } = sensor;
+    const sensors = [];
 
-        const dataQuery = `
-          from(bucket: "${INFLUX_CONFIG.bucket}")
-            |> range(start: -1h)
-            |> filter(fn: (r) => r._measurement == "sensor_data")
-            |> filter(fn: (r) => r.devEUI == "${devEUI}")
-            |> sort(columns: ["_time"], desc: true)
-            |> limit(n: 1)
-        `;
+    // For each sensor, get latest measurement from InfluxDB
+    for (const sensor of sensorRows) {
+      const { devEUI, name, village, panchayat } = sensor;
 
-        const data = await queryInfluxDB(dataQuery);
+      const dataQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
 
-        let latestValue = 'No data';
-        let latestTime = '';
-        let status = 'Offline';
+      const data = await queryInfluxDB(dataQuery);
 
-        if (data.length > 0) {
-          latestValue = `${data[0]._field}: ${data[0]._value}`;
-          const t = new Date(data[0]._time);
-          latestTime = t.toLocaleString();
-          const now = new Date();
-          const diffSeconds = (now - t) / 1000;
-          status = diffSeconds <= 22 ? 'Live' : 'Offline';
-        }
+      let latestValue = 'No data';
+      let latestTime = '';
+      let status = 'Offline';
 
-        sensors.push({
-          devEUI,
-          name,
-          village,
-          panchayat,
-          measurement: latestValue,
-          time: latestTime,
-          status,
-          isMine: true // Mark as villager's own sensor
-        });
+      if (data.length > 0) {
+        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        const t = new Date(data[0]._time);
+        latestTime = t.toLocaleString();
+        const now = new Date();
+        const diffSeconds = (now - t) / 1000;
+        status = diffSeconds <= 22 ? 'Live' : 'Offline';
       }
 
-      res.json({ 
-        success: true, 
-        sensors,
-        count: sensors.length,
-        role: 'villager',
-        message: `Showing ${sensors.length} sensors mapped to you`
-      });
-      
-    } else {
-      // Website request (no token or admin token) - show all sensors
-      console.log('🌐 Website request or no token - showing all sensors');
-      
-      const [sensorRows] = await db.query(
-        `SELECT id, devEUI, name, village, panchayat
-         FROM sensors
-         ORDER BY id DESC`
-      );
-
-      console.log(`📊 Total sensors in system: ${sensorRows.length}`);
-
-      const sensors = [];
-
-      // For each sensor, get latest measurement from InfluxDB
-      for (const sensor of sensorRows) {
-        const { devEUI, name, village, panchayat } = sensor;
-
-        const dataQuery = `
-          from(bucket: "${INFLUX_CONFIG.bucket}")
-            |> range(start: -1h)
-            |> filter(fn: (r) => r._measurement == "sensor_data")
-            |> filter(fn: (r) => r.devEUI == "${devEUI}")
-            |> sort(columns: ["_time"], desc: true)
-            |> limit(n: 1)
-        `;
-
-        const data = await queryInfluxDB(dataQuery);
-
-        let latestValue = 'No data';
-        let latestTime = '';
-        let status = 'Offline';
-
-        if (data.length > 0) {
-          latestValue = `${data[0]._field}: ${data[0]._value}`;
-          const t = new Date(data[0]._time);
-          latestTime = t.toLocaleString();
-          const now = new Date();
-          const diffSeconds = (now - t) / 1000;
-          status = diffSeconds <= 22 ? 'Live' : 'Offline';
-        }
-
-        sensors.push({
-          devEUI,
-          name,
-          village,
-          panchayat,
-          measurement: latestValue,
-          time: latestTime,
-          status
-        });
-      }
-
-      res.json({ 
-        success: true, 
-        sensors,
-        count: sensors.length,
-        role: user.role,
-        message: `Showing all ${sensors.length} sensors in the system`
+      sensors.push({
+        devEUI,
+        name,
+        village,
+        panchayat,
+        measurement: latestValue,
+        time: latestTime,
+        status
       });
     }
+
+    res.json({ success: true, sensors });
   } catch (err) {
     console.error('❌ Error fetching sensors:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -665,9 +522,9 @@ app.post('/api/sensors', async (req, res) => {
       }
 
       await conn.query(
-        `INSERT INTO villager_sensors (villager_id, sensor_id)
-         VALUES (?, ?)`,
-        [villager.id, sensorId]
+        `INSERT INTO villager_sensors (villager_id, sensor_id, phone)
+         VALUES (?, ?, ?)`,
+        [villager.id, sensorId, phone]
       );
     }
 
@@ -737,9 +594,9 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
       }
 
       await conn.query(
-        `INSERT INTO villager_sensors (villager_id, sensor_id)
-         VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?))`,
-        [villager.id, devEUI]
+        `INSERT INTO villager_sensors (villager_id, sensor_id, phone)
+         VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?), ?)`,
+        [villager.id, devEUI, phone]
       );
     }
 
@@ -807,6 +664,107 @@ app.delete('/api/sensors/:devEUI', async (req, res) => {
     });
   } finally {
     conn.release();
+  }
+});
+
+// ==================== MOBILE ENDPOINTS ====================
+
+// Get sensors for logged-in user (MOBILE ONLY - shows only user's sensors)
+app.get('/api/mobile/sensors', async (req, res) => {
+  try {
+    const { phone } = req.query;
+
+    console.log('📱 MOBILE SENSORS request for phone:', phone);
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone number is required'
+      });
+    }
+
+    // Get villager ID
+    const [[villager]] = await db.query(
+      `SELECT id, name, phone, village, panchayat 
+       FROM villagers WHERE phone = ?`,
+      [phone]
+    );
+
+    if (!villager) {
+      return res.status(404).json({
+        success: false,
+        error: 'Villager not found'
+      });
+    }
+
+    // Get only sensors mapped to this villager
+    const [sensorRows] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+       FROM sensors s
+       JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE vs.villager_id = ?
+       ORDER BY s.id DESC`,
+      [villager.id]
+    );
+
+    const sensors = [];
+
+    // For each sensor, get latest measurement from InfluxDB
+    for (const sensor of sensorRows) {
+      const { devEUI, name, village, panchayat } = sensor;
+
+      const dataQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
+
+      const data = await queryInfluxDB(dataQuery);
+
+      let latestValue = 'No data';
+      let latestTime = '';
+      let status = 'Offline';
+
+      if (data.length > 0) {
+        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        const t = new Date(data[0]._time);
+        latestTime = t.toLocaleString();
+        const now = new Date();
+        const diffSeconds = (now - t) / 1000;
+        status = diffSeconds <= 22 ? 'Live' : 'Offline';
+      }
+
+      sensors.push({
+        devEUI,
+        name,
+        village,
+        panchayat,
+        measurement: latestValue,
+        time: latestTime,
+        status
+      });
+    }
+
+    res.json({
+      success: true,
+      villager: {
+        name: villager.name,
+        phone: villager.phone,
+        village: villager.village,
+        panchayat: villager.panchayat
+      },
+      sensors: sensors,
+      sensorCount: sensors.length
+    });
+  } catch (err) {
+    console.error('❌ Error fetching mobile sensors:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
@@ -889,7 +847,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
 // ==================== MOBILE AUTHENTICATION ====================
 
-// Aadhaar login - IMPROVED: Generate proper token with phone
+// Aadhaar login
 app.post('/api/login', async (req, res) => {
   const { aadhaarNumber } = req.body;
 
@@ -909,6 +867,7 @@ app.post('/api/login', async (req, res) => {
       user: {
         name: 'Admin User',
         aadhaarNumber: aadhaarNumber,
+        phone: '0000000000',
         role: 'admin'
       }
     });
@@ -917,7 +876,7 @@ app.post('/api/login', async (req, res) => {
   // Check if villager exists
   try {
     const [rows] = await db.query(
-      `SELECT id, name, phone, village, panchayat
+      `SELECT name, phone, village, panchayat
        FROM villagers WHERE aadhaar = ?`,
       [aadhaarNumber]
     );
@@ -929,22 +888,15 @@ app.post('/api/login', async (req, res) => {
       });
     }
 
-    const villager = rows[0];
-    
-    // Generate token with phone number: villager-<timestamp>-<phone>
-    const token = 'villager-' + Date.now() + '-' + villager.phone;
-    console.log('✅ Generated villager token:', token);
-    
     res.json({
       success: true,
-      token: token,
+      token: 'villager-' + Date.now(),
       user: {
-        id: villager.id,
-        name: villager.name,
+        name: rows[0].name,
         aadhaarNumber: aadhaarNumber,
-        phone: villager.phone,
-        village: villager.village,
-        panchayat: villager.panchayat,
+        phone: rows[0].phone,
+        village: rows[0].village,
+        panchayat: rows[0].panchayat,
         role: 'villager'
       }
     });
@@ -1026,7 +978,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
 
     // First check if phone exists
     const [rows] = await db.query(
-      `SELECT id, aadhaar FROM villagers WHERE phone = ?`,
+      `SELECT aadhaar FROM villagers WHERE phone = ?`,
       [phone]
     );
 
@@ -1037,7 +989,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
       });
     }
 
-    const villager = rows[0];
+    const aadhaarNumber = rows[0].aadhaar;
 
     // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -1048,12 +1000,11 @@ app.post('/api/verify/send-otp', async (req, res) => {
       otp,
       expiresAt,
       phone,
-      villagerId: villager.id,
-      aadhaarNumber: villager.aadhaar,
+      aadhaarNumber,
       attempts: 0
     });
 
-    console.log(`✅ OTP ${otp} generated for phone ${phone}, villager ID: ${villager.id}`);
+    console.log(`✅ OTP ${otp} generated for phone ${phone}`);
 
     res.json({
       success: true,
@@ -1070,7 +1021,7 @@ app.post('/api/verify/send-otp', async (req, res) => {
   }
 });
 
-// Verify OTP - IMPROVED: Generate proper token
+// Verify OTP
 app.post('/api/verify/check-otp', async (req, res) => {
   try {
     const { phone, otp } = req.body;
@@ -1124,7 +1075,7 @@ app.post('/api/verify/check-otp', async (req, res) => {
 
     // OTP is correct - get villager data
     const [rows] = await db.query(
-      `SELECT id, aadhaar, name, village, panchayat
+      `SELECT aadhaar, name, village, panchayat
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -1138,27 +1089,36 @@ app.post('/api/verify/check-otp', async (req, res) => {
 
     const villager = rows[0];
 
-    // Generate token with phone number: villager-<timestamp>-<phone>
+    // Get sensor count for this villager
+    const [[sensorCountResult]] = await db.query(
+      `SELECT COUNT(*) as sensor_count 
+       FROM villager_sensors vs
+       JOIN villagers v ON v.id = vs.villager_id
+       WHERE v.phone = ?`,
+      [phone]
+    );
+
+    const sensorCount = sensorCountResult.sensor_count || 0;
+
+    // Generate token
     const token = 'villager-' + Date.now() + '-' + phone;
-    console.log('✅ OTP verified. Generated token:', token);
 
     // Clear OTP after successful verification
     otpStore.delete(phone);
 
-    console.log(`✅ OTP verified for phone ${phone}, villager ID: ${villager.id}`);
+    console.log(`✅ OTP verified for phone ${phone}, ${sensorCount} sensors found`);
 
     res.json({
       success: true,
       token: token,
       user: {
-        id: villager.id,
         name: villager.name,
         aadhaar_number: villager.aadhaar,
         phone: phone,
         village: villager.village,
         panchayat: villager.panchayat,
         role: 'villager',
-        can_edit: false
+        sensor_count: sensorCount
       },
       permissions: {
         can_view: true,
@@ -1192,21 +1152,6 @@ app.post('/api/verify/resend-otp', async (req, res) => {
     // Clear any existing OTP
     otpStore.delete(phone);
 
-    // Get villager ID for the phone
-    const [rows] = await db.query(
-      `SELECT id, aadhaar FROM villagers WHERE phone = ?`,
-      [phone]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Phone number not registered'
-      });
-    }
-
-    const villager = rows[0];
-
     // Generate new OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
@@ -1215,12 +1160,10 @@ app.post('/api/verify/resend-otp', async (req, res) => {
       otp,
       expiresAt,
       phone,
-      villagerId: villager.id,
-      aadhaarNumber: villager.aadhaar,
       attempts: 0
     });
 
-    console.log(`✅ New OTP ${otp} generated for ${phone}, villager ID: ${villager.id}`);
+    console.log(`✅ New OTP ${otp} generated for ${phone}`);
 
     res.json({
       success: true,
@@ -1322,36 +1265,6 @@ app.get('/api/debug/table/:tableName', async (req, res) => {
   }
 });
 
-// Debug endpoint to check sensor mappings
-app.get('/api/debug/sensor-mappings', async (req, res) => {
-  try {
-    const [mappings] = await db.query(
-      `SELECT 
-         v.id as villager_id,
-         v.name as villager_name,
-         v.phone,
-         s.id as sensor_id,
-         s.devEUI,
-         s.name as sensor_name
-       FROM villagers v
-       LEFT JOIN villager_sensors vs ON vs.villager_id = v.id
-       LEFT JOIN sensors s ON s.id = vs.sensor_id
-       ORDER BY v.id, s.id`
-    );
-    
-    res.json({
-      success: true,
-      mappings: mappings,
-      count: mappings.length
-    });
-  } catch (error) {
-    res.json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
@@ -1389,26 +1302,17 @@ app.listen(PORT, () => {
   console.log('══════════════════════════════════════════════════════');
   console.log(`📡 Server running on port: ${PORT}`);
   console.log(`🔧 API:    /api/*`);
-  console.log(`📱 Mobile: /api/verify/*`);
+  console.log(`📱 Mobile: /api/verify/*, /api/mobile/sensors`);
   console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
   console.log('══════════════════════════════════════════════════════');
   console.log('✅ Available API Endpoints:');
   console.log('   GET  /api/villagers');
-  console.log('   GET  /api/sensors            (Website: all, Mobile: only yours with token)');
+  console.log('   GET  /api/sensors');
+  console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
   console.log('   GET  /api/admin/dashboard');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
   console.log('   POST /api/verify/resend-otp');
-  console.log('══════════════════════════════════════════════════════');
-  console.log('🔐 Mobile App Instructions:');
-  console.log('   1. Login via /api/login or /api/verify/check-otp');
-  console.log('   2. Save the token: villager-<timestamp>-<phone>');
-  console.log('   3. Fetch sensors with Authorization header:');
-  console.log('      Authorization: Bearer villager-123456789-9876543210');
-  console.log('   4. You will see ONLY your sensors');
-  console.log('══════════════════════════════════════════════════════');
-  console.log('🔧 Debug Tools:');
-  console.log('   GET /api/debug/sensor-mappings - Check all mappings');
   console.log('══════════════════════════════════════════════════════');
 });
