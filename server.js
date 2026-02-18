@@ -1265,6 +1265,165 @@ app.get('/api/debug/table/:tableName', async (req, res) => {
   }
 });
 
+
+// Get unassigned sensors by village
+app.get('/api/sensors/unassigned', async (req, res) => {
+  try {
+    const { village } = req.query;
+    
+    if (!village) {
+      return res.status(400).json({
+        success: false,
+        error: 'Village name is required'
+      });
+    }
+
+    // Get sensors in this village that are NOT mapped to any villager
+    const [sensorRows] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE s.village = ? AND vs.id IS NULL
+       ORDER BY s.name ASC`,
+      [village]
+    );
+
+    const sensors = [];
+
+    // For each unassigned sensor, get latest measurement from InfluxDB
+    for (const sensor of sensorRows) {
+      const { devEUI, name, village, panchayat } = sensor;
+
+      const dataQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
+
+      const data = await queryInfluxDB(dataQuery);
+
+      let latestValue = 'No data';
+      let latestTime = '';
+      let status = 'Offline';
+
+      if (data.length > 0) {
+        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        const t = new Date(data[0]._time);
+        latestTime = t.toLocaleString();
+        const now = new Date();
+        const diffSeconds = (now - t) / 1000;
+        status = diffSeconds <= 22 ? 'Live' : 'Offline';
+      }
+
+      sensors.push({
+        devEUI,
+        name,
+        village,
+        panchayat,
+        measurement: latestValue,
+        time: latestTime,
+        status,
+        isAssigned: false
+      });
+    }
+
+    res.json({
+      success: true,
+      village: village,
+      sensors: sensors,
+      count: sensors.length
+    });
+
+  } catch (err) {
+    console.error('❌ Error fetching unassigned sensors:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// Map sensor to villager
+app.post('/api/sensors/map', async (req, res) => {
+  try {
+    const { devEUI, phone } = req.body;
+
+    if (!devEUI || !phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'devEUI and phone are required'
+      });
+    }
+
+    const conn = await db.getConnection();
+    await conn.beginTransaction();
+
+    try {
+      // Get villager ID
+      const [[villager]] = await conn.query(
+        `SELECT id FROM villagers WHERE phone = ?`,
+        [phone]
+      );
+
+      if (!villager) {
+        throw new Error('Villager not found');
+      }
+
+      // Get sensor ID
+      const [[sensor]] = await conn.query(
+        `SELECT id FROM sensors WHERE devEUI = ?`,
+        [devEUI]
+      );
+
+      if (!sensor) {
+        throw new Error('Sensor not found');
+      }
+
+      // Check if already mapped
+      const [[existing]] = await conn.query(
+        `SELECT id FROM villager_sensors 
+         WHERE villager_id = ? AND sensor_id = ?`,
+        [villager.id, sensor.id]
+      );
+
+      if (existing) {
+        throw new Error('Sensor already mapped to this villager');
+      }
+
+      // Map sensor to villager
+      await conn.query(
+        `INSERT INTO villager_sensors (villager_id, sensor_id, phone)
+         VALUES (?, ?, ?)`,
+        [villager.id, sensor.id, phone]
+      );
+
+      await conn.commit();
+
+      res.json({
+        success: true,
+        message: 'Sensor mapped successfully'
+      });
+
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+  } catch (err) {
+    console.error('❌ Error mapping sensor:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
