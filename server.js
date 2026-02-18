@@ -1268,11 +1268,14 @@ app.get('/api/debug/table/:tableName', async (req, res) => {
 // ==================== NEW FEATURES: UNASSIGNED SENSORS & MAPPING ====================
 
 // Get unassigned sensors by village (sensors not mapped to any phone number)
-app.get('/api/sensors/unassigned', async (req, res) => {
+// ==================== GET UNASSIGNED SENSORS BY VILLAGE (NEW ROUTE) ====================
+
+// Get unassigned sensors in a specific village - Using a different path to avoid conflicts
+app.get('/api/village-sensors/unassigned', async (req, res) => {
   try {
     const { village } = req.query;
     
-    console.log('📍 Searching for unassigned sensors in village:', village);
+    console.log('📍 VILLAGE-SENSORS: Searching for unassigned sensors in village:', village);
 
     if (!village) {
       return res.status(400).json({
@@ -1352,13 +1355,12 @@ app.get('/api/sensors/unassigned', async (req, res) => {
         });
       } catch (influxError) {
         console.error(`Error fetching InfluxDB data for sensor ${devEUI}:`, influxError);
-        // Still add the sensor even if InfluxDB fails
         sensors.push({
           devEUI,
           name,
           village,
           panchayat,
-          measurement: 'Error fetching data',
+          measurement: 'No data',
           time: '',
           status: 'Unknown',
           isAssigned: false
