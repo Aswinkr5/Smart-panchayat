@@ -1423,6 +1423,236 @@ app.post('/api/sensors/map', async (req, res) => {
   }
 });
 
+// ==================== NEW: GET UNASSIGNED SENSORS BY VILLAGE ====================
+
+// Get unassigned sensors by village (sensors not mapped to any phone number)
+app.get('/api/sensors/unassigned', async (req, res) => {
+  try {
+    const { village } = req.query;
+    
+    console.log('📍 Searching for unassigned sensors in village:', village);
+
+    if (!village) {
+      return res.status(400).json({
+        success: false,
+        error: 'Village name is required'
+      });
+    }
+
+    // Get sensors in this village that are NOT mapped to any villager
+    const [sensorRows] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE s.village = ? AND vs.id IS NULL
+       ORDER BY s.name ASC`,
+      [village]
+    );
+
+    console.log(`Found ${sensorRows.length} unassigned sensors in ${village}`);
+
+    const sensors = [];
+
+    // For each unassigned sensor, get latest measurement from InfluxDB
+    for (const sensor of sensorRows) {
+      const { devEUI, name, village, panchayat } = sensor;
+
+      try {
+        const dataQuery = `
+          from(bucket: "${INFLUX_CONFIG.bucket}")
+            |> range(start: -1h)
+            |> filter(fn: (r) => r._measurement == "sensor_data")
+            |> filter(fn: (r) => r.devEUI == "${devEUI}")
+            |> sort(columns: ["_time"], desc: true)
+            |> limit(n: 1)
+        `;
+
+        const data = await queryInfluxDB(dataQuery);
+
+        let latestValue = 'No data';
+        let latestTime = '';
+        let status = 'Offline';
+
+        if (data.length > 0) {
+          latestValue = `${data[0]._field}: ${data[0]._value}`;
+          const t = new Date(data[0]._time);
+          latestTime = t.toLocaleString();
+          const now = new Date();
+          const diffSeconds = (now - t) / 1000;
+          status = diffSeconds <= 22 ? 'Live' : 'Offline';
+        }
+
+        sensors.push({
+          devEUI,
+          name,
+          village,
+          panchayat,
+          measurement: latestValue,
+          time: latestTime,
+          status,
+          isAssigned: false
+        });
+      } catch (influxError) {
+        console.error(`Error fetching InfluxDB data for sensor ${devEUI}:`, influxError);
+        // Still add the sensor even if InfluxDB fails
+        sensors.push({
+          devEUI,
+          name,
+          village,
+          panchayat,
+          measurement: 'Error fetching data',
+          time: '',
+          status: 'Unknown',
+          isAssigned: false
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      village: village,
+      sensors: sensors,
+      count: sensors.length
+    });
+
+  } catch (err) {
+    console.error('❌ Error fetching unassigned sensors:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// ==================== NEW: MAP SENSOR TO VILLAGER ====================
+
+// Map sensor to villager
+app.post('/api/sensors/map', async (req, res) => {
+  try {
+    const { devEUI, phone } = req.body;
+
+    if (!devEUI || !phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'devEUI and phone are required'
+      });
+    }
+
+    const conn = await db.getConnection();
+    await conn.beginTransaction();
+
+    try {
+      // Get villager ID
+      const [[villager]] = await conn.query(
+        `SELECT id FROM villagers WHERE phone = ?`,
+        [phone]
+      );
+
+      if (!villager) {
+        throw new Error('Villager not found with this phone number');
+      }
+
+      // Get sensor ID
+      const [[sensor]] = await conn.query(
+        `SELECT id FROM sensors WHERE devEUI = ?`,
+        [devEUI]
+      );
+
+      if (!sensor) {
+        throw new Error('Sensor not found with this devEUI');
+      }
+
+      // Check if already mapped to anyone
+      const [[existing]] = await conn.query(
+        `SELECT id FROM villager_sensors WHERE sensor_id = ?`,
+        [sensor.id]
+      );
+
+      if (existing) {
+        throw new Error('Sensor is already mapped to another villager');
+      }
+
+      // Map sensor to villager
+      await conn.query(
+        `INSERT INTO villager_sensors (villager_id, sensor_id, phone)
+         VALUES (?, ?, ?)`,
+        [villager.id, sensor.id, phone]
+      );
+
+      await conn.commit();
+
+      res.json({
+        success: true,
+        message: 'Sensor mapped successfully'
+      });
+
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+  } catch (err) {
+    console.error('❌ Error mapping sensor:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// ==================== NEW: DEBUG ENDPOINT TO CHECK VILLAGES ====================
+
+// Debug endpoint to check villages and unassigned sensors
+app.get('/api/debug/villages', async (req, res) => {
+  try {
+    // Get all distinct villages
+    const [villages] = await db.query(
+      `SELECT DISTINCT village FROM sensors WHERE village IS NOT NULL ORDER BY village`
+    );
+
+    // Get count of sensors per village with assignment status
+    const [sensorCounts] = await db.query(
+      `SELECT 
+         s.village, 
+         COUNT(*) as total_sensors,
+         SUM(CASE WHEN vs.id IS NULL THEN 1 ELSE 0 END) as unassigned_count,
+         SUM(CASE WHEN vs.id IS NOT NULL THEN 1 ELSE 0 END) as assigned_count
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE s.village IS NOT NULL
+       GROUP BY s.village
+       ORDER BY s.village`
+    );
+
+    // Get all unassigned sensors (for quick check)
+    const [unassignedSensors] = await db.query(
+      `SELECT s.devEUI, s.name, s.village
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE vs.id IS NULL
+       ORDER BY s.village`
+    );
+
+    res.json({
+      success: true,
+      villages: villages.map(v => v.village),
+      sensorCounts: sensorCounts,
+      totalUnassigned: unassignedSensors.length,
+      unassignedSensors: unassignedSensors,
+      message: 'Use this to verify village names and sensor assignments'
+    });
+
+  } catch (err) {
+    console.error('❌ Debug endpoint error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
 
 // ==================== SERVING HTML PAGES ====================
 
