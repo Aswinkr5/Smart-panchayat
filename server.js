@@ -1426,6 +1426,9 @@ app.post('/api/sensors/map', async (req, res) => {
 // ==================== NEW: GET UNASSIGNED SENSORS BY VILLAGE ====================
 
 // Get unassigned sensors by village (sensors not mapped to any phone number)
+// ==================== GET UNASSIGNED SENSORS BY VILLAGE ====================
+
+// Get unassigned sensors by village (sensors not mapped to any phone number)
 app.get('/api/sensors/unassigned', async (req, res) => {
   try {
     const { village } = req.query;
@@ -1436,6 +1439,22 @@ app.get('/api/sensors/unassigned', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'Village name is required'
+      });
+    }
+
+    // IMPORTANT: First check if the village exists
+    const [villageCheck] = await db.query(
+      `SELECT DISTINCT village FROM sensors WHERE village = ?`,
+      [village]
+    );
+
+    if (villageCheck.length === 0) {
+      return res.json({
+        success: true,
+        village: village,
+        sensors: [],
+        count: 0,
+        message: `No sensors found in village "${village}"`
       });
     }
 
