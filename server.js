@@ -1509,6 +1509,54 @@ app.get('/api/debug/villages', async (req, res) => {
   }
 });
 
+// Get sensor history for graphing
+app.get('/api/sensors/:devEUI/history', async (req, res) => {
+  try {
+    const { devEUI } = req.params;
+    const { range } = req.query; // e.g., -24h, -7d, -30d, -90d
+    
+    console.log(`📊 Fetching history for sensor ${devEUI} with range ${range}`);
+
+    // Determine time range
+    let rangeValue = '-24h';
+    if (range) {
+      rangeValue = range;
+    }
+
+    // Query InfluxDB for historical data
+    const fluxQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: ${rangeValue})
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r.devEUI == "${devEUI}")
+        |> aggregateWindow(every: 1h, fn: mean)
+        |> sort(columns: ["_time"], desc: false)
+    `;
+
+    const rows = await queryInfluxDB(fluxQuery);
+    
+    const history = rows.map(row => ({
+      time: row._time,
+      value: row._value,
+      field: row._field
+    }));
+
+    res.json({
+      success: true,
+      history: history,
+      count: history.length
+    });
+
+  } catch (err) {
+    console.error('❌ Error fetching sensor history:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
