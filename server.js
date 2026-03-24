@@ -225,6 +225,8 @@ app.get('/api/villagers', async (req, res) => {
          phone,
          village,
          panchayat,
+         district,
+         state,
          occupation,
          address,
          created_at
@@ -256,6 +258,8 @@ app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
          phone,
          village,
          panchayat,
+         district,
+         state,
          occupation,
          address,
          created_at
@@ -277,16 +281,19 @@ app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
 // Add new villager
 app.post('/api/villagers', async (req, res) => {
   try {
-    const { aadhaarNumber, name, phone, village, panchayat, occupation, address } = req.body;
+    const { aadhaarNumber, name, phone, village, panchayat, district, state, occupation, address } = req.body;
 
-    if (!aadhaarNumber || !name || !phone || !village || !panchayat) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    if (!aadhaarNumber || !name || !phone || !village || !panchayat || !district || !state) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: aadhaarNumber, name, phone, village, panchayat, district, state' 
+      });
     }
 
     await db.query(
-      `INSERT INTO villagers (aadhaar, name, phone, village, panchayat, occupation, address)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [aadhaarNumber, name, phone, village, panchayat, occupation, address]
+      `INSERT INTO villagers (aadhaar, name, phone, village, panchayat, district, state, occupation, address)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [aadhaarNumber, name, phone, village, panchayat, district, state, occupation, address]
     );
 
     res.json({ success: true, message: 'Villager added successfully' });
@@ -302,13 +309,13 @@ app.post('/api/villagers', async (req, res) => {
 app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
   try {
     const { aadhaarNumber } = req.params;
-    const { name, phone, village, panchayat, occupation, address } = req.body;
+    const { name, phone, village, panchayat, district, state, occupation, address } = req.body;
 
     const [result] = await db.query(
       `UPDATE villagers
-       SET name = ?, phone = ?, village = ?, panchayat = ?, occupation = ?, address = ?
+       SET name = ?, phone = ?, village = ?, panchayat = ?, district = ?, state = ?, occupation = ?, address = ?
        WHERE aadhaar = ?`,
-      [name, phone, village, panchayat, occupation, address, aadhaarNumber]
+      [name, phone, village, panchayat, district, state, occupation, address, aadhaarNumber]
     );
 
     if (result.affectedRows === 0) {
@@ -348,7 +355,7 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
     // Get villager
     const [[villager]] = await db.query(
-      `SELECT id, name, aadhaar, phone, village, panchayat
+      `SELECT id, name, aadhaar, phone, village, panchayat, district, state
        FROM villagers WHERE aadhaar = ?`,
       [aadhaar]
     );
@@ -362,7 +369,7 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
     // Get mapped sensors
     const [sensors] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state
        FROM sensors s
        JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE vs.villager_id = ?`,
@@ -400,6 +407,8 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
         name: sensor.name,
         village: sensor.village,
         panchayat: sensor.panchayat,
+        district: sensor.district,
+        state: sensor.state,
         measurement,
         time,
         status
@@ -427,7 +436,7 @@ app.get('/api/sensors', async (req, res) => {
   try {
     // Get sensor metadata from MySQL
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, village, panchayat
+      `SELECT id, devEUI, name, village, panchayat, district, state
        FROM sensors
        ORDER BY id DESC`
     );
@@ -436,7 +445,7 @@ app.get('/api/sensors', async (req, res) => {
 
     // For each sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat } = sensor;
+      const { devEUI, name, village, panchayat, district, state } = sensor;
 
       const dataQuery = `
         from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -467,6 +476,8 @@ app.get('/api/sensors', async (req, res) => {
         name,
         village,
         panchayat,
+        district,
+        state,
         measurement: latestValue,
         time: latestTime,
         status
@@ -486,7 +497,7 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
     const { devEUI } = req.params;
 
     const [rows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat,
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state,
               v.phone, v.name AS villager_name, v.aadhaar
        FROM sensors s
        LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
@@ -517,7 +528,7 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
 
 // Add new sensor
 app.post('/api/sensors', async (req, res) => {
-  const { devEUI, deviceName, village, panchayat, phone } = req.body;
+  const { devEUI, deviceName, village, panchayat, district, state, phone } = req.body;
 
   if (!devEUI || !deviceName) {
     return res.status(400).json({
@@ -530,11 +541,11 @@ app.post('/api/sensors', async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // Insert sensor
+    // Insert sensor with district and state
     const [sensorResult] = await conn.query(
-      `INSERT INTO sensors (devEUI, name, village, panchayat)
-       VALUES (?, ?, ?, ?)`,
-      [devEUI, deviceName, village || null, panchayat || null]
+      `INSERT INTO sensors (devEUI, name, village, panchayat, district, state)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [devEUI, deviceName, village || null, panchayat || null, district || null, state || null]
     );
 
     const sensorId = sensorResult.insertId;
@@ -587,7 +598,7 @@ app.post('/api/sensors', async (req, res) => {
 // Update sensor
 app.put('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
-  const { deviceName, village, panchayat, phone } = req.body;
+  const { deviceName, village, panchayat, district, state, phone } = req.body;
 
   const conn = await db.getConnection();
   try {
@@ -596,9 +607,9 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
     // Update sensor metadata
     const [result] = await conn.query(
       `UPDATE sensors
-       SET name = ?, village = ?, panchayat = ?
+       SET name = ?, village = ?, panchayat = ?, district = ?, state = ?
        WHERE devEUI = ?`,
-      [deviceName, village || null, panchayat || null, devEUI]
+      [deviceName, village || null, panchayat || null, district || null, state || null, devEUI]
     );
 
     if (result.affectedRows === 0) {
@@ -714,7 +725,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
 
     // Get villager ID
     const [[villager]] = await db.query(
-      `SELECT id, name, phone, village, panchayat 
+      `SELECT id, name, phone, village, panchayat, district, state
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -728,7 +739,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
 
     // Get only sensors mapped to this villager
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state
        FROM sensors s
        JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE vs.villager_id = ?
@@ -740,7 +751,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
 
     // For each sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat } = sensor;
+      const { devEUI, name, village, panchayat, district, state } = sensor;
 
       const dataQuery = `
         from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -771,6 +782,8 @@ app.get('/api/mobile/sensors', async (req, res) => {
         name,
         village,
         panchayat,
+        district,
+        state,
         measurement: latestValue,
         time: latestTime,
         status
@@ -783,7 +796,9 @@ app.get('/api/mobile/sensors', async (req, res) => {
         name: villager.name,
         phone: villager.phone,
         village: villager.village,
-        panchayat: villager.panchayat
+        panchayat: villager.panchayat,
+        district: villager.district,
+        state: villager.state
       },
       sensors: sensors,
       sensorCount: sensors.length
@@ -815,8 +830,10 @@ app.get('/api/admin/dashboard', async (req, res) => {
          name,
          aadhaar AS aadhaar_number,
          village,
-         phone,
-         panchayat
+         panchayat,
+         district,
+         state,
+         phone
        FROM villagers
        ORDER BY created_at DESC
        LIMIT 5`
@@ -824,7 +841,10 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
     // Get recent sensors with status
     const [sensorRows] = await db.query(
-      `SELECT devEUI, name, village, panchayat FROM sensors ORDER BY installed_at DESC LIMIT 5`
+      `SELECT devEUI, name, village, panchayat, district, state 
+       FROM sensors 
+       ORDER BY installed_at DESC 
+       LIMIT 5`
     );
 
     const recentSensors = [];
@@ -851,6 +871,8 @@ app.get('/api/admin/dashboard', async (req, res) => {
         name: sensor.name,
         village: sensor.village,
         panchayat: sensor.panchayat,
+        district: sensor.district,
+        state: sensor.state,
         status
       });
     }
@@ -905,7 +927,7 @@ app.post('/api/login', async (req, res) => {
   // Check if villager exists
   try {
     const [rows] = await db.query(
-      `SELECT name, phone, village, panchayat
+      `SELECT name, phone, village, panchayat, district, state
        FROM villagers WHERE aadhaar = ?`,
       [aadhaarNumber]
     );
@@ -926,6 +948,8 @@ app.post('/api/login', async (req, res) => {
         phone: rows[0].phone,
         village: rows[0].village,
         panchayat: rows[0].panchayat,
+        district: rows[0].district,
+        state: rows[0].state,
         role: 'villager'
       }
     });
@@ -953,7 +977,7 @@ app.post('/api/verify/check-phone', async (req, res) => {
 
     // Query MySQL for phone number
     const [rows] = await db.query(
-      `SELECT id, aadhaar, name, village, panchayat
+      `SELECT id, aadhaar, name, village, panchayat, district, state
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -979,6 +1003,8 @@ app.post('/api/verify/check-phone', async (req, res) => {
         phone: phone,
         village: villager.village,
         panchayat: villager.panchayat,
+        district: villager.district,
+        state: villager.state,
         role: 'villager'
       }
     });
@@ -1104,7 +1130,7 @@ app.post('/api/verify/check-otp', async (req, res) => {
 
     // OTP is correct - get villager data
     const [rows] = await db.query(
-      `SELECT aadhaar, name, village, panchayat
+      `SELECT aadhaar, name, village, panchayat, district, state
        FROM villagers WHERE phone = ?`,
       [phone]
     );
@@ -1146,6 +1172,8 @@ app.post('/api/verify/check-otp', async (req, res) => {
         phone: phone,
         village: villager.village,
         panchayat: villager.panchayat,
+        district: villager.district,
+        state: villager.state,
         role: 'villager',
         sensor_count: sensorCount
       },
@@ -1297,9 +1325,6 @@ app.get('/api/debug/table/:tableName', async (req, res) => {
 // ==================== NEW FEATURES: UNASSIGNED SENSORS & MAPPING ====================
 
 // Get unassigned sensors by village (sensors not mapped to any phone number)
-// ==================== GET UNASSIGNED SENSORS BY VILLAGE (NEW ROUTE) ====================
-
-// Get unassigned sensors in a specific village - Using a different path to avoid conflicts
 app.get('/api/village-sensors/unassigned', async (req, res) => {
   try {
     const { village } = req.query;
@@ -1331,7 +1356,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
 
     // Get sensors in this village that are NOT mapped to any villager
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat
+      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state
        FROM sensors s
        LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE s.village = ? AND vs.id IS NULL
@@ -1345,7 +1370,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
 
     // For each unassigned sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat } = sensor;
+      const { devEUI, name, village, panchayat, district, state } = sensor;
 
       try {
         const dataQuery = `
@@ -1377,6 +1402,8 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
           name,
           village,
           panchayat,
+          district,
+          state,
           measurement: latestValue,
           time: latestTime,
           status,
@@ -1389,6 +1416,8 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
           name,
           village,
           panchayat,
+          district,
+          state,
           measurement: 'No data',
           time: '',
           status: 'Unknown',
