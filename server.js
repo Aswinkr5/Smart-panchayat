@@ -707,6 +707,125 @@ app.delete('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
+// ==================== DISTRICT-BASED SENSOR QUERY (NEW) ====================
+
+// Get sensors by district
+app.get('/api/sensors/by-district', async (req, res) => {
+  try {
+    const { district } = req.query;
+    
+    console.log('📍 Fetching sensors for district:', district);
+
+    if (!district) {
+      return res.status(400).json({
+        success: false,
+        error: 'District name is required'
+      });
+    }
+
+    // Get sensors from MySQL by district
+    const [sensorRows] = await db.query(
+      `SELECT id, devEUI, name, village, panchayat, district, state
+       FROM sensors 
+       WHERE district = ? 
+       ORDER BY name ASC`,
+      [district]
+    );
+
+    console.log(`📊 Found ${sensorRows.length} sensors in ${district} district`);
+
+    const sensors = [];
+
+    // For each sensor, get latest measurement from InfluxDB
+    for (const sensor of sensorRows) {
+      const { devEUI, name, village, panchayat, district: sensorDistrict, state } = sensor;
+
+      const dataQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+      `;
+
+      const data = await queryInfluxDB(dataQuery);
+
+      let latestValue = 'No data';
+      let latestTime = '';
+      let status = 'Offline';
+      let isAssigned = false;
+
+      // Check if sensor is already assigned to any villager
+      const [[assignment]] = await db.query(
+        `SELECT id FROM villager_sensors WHERE sensor_id = ?`,
+        [sensor.id]
+      );
+      isAssigned = assignment !== null;
+
+      if (data.length > 0) {
+        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        const t = new Date(data[0]._time);
+        latestTime = t.toLocaleString();
+        const now = new Date();
+        const diffSeconds = (now - t) / 1000;
+        status = diffSeconds <= 22 ? 'Live' : 'Offline';
+      }
+
+      sensors.push({
+        devEUI,
+        name,
+        village: village || 'Unknown',
+        panchayat: panchayat || 'Unknown',
+        district: sensorDistrict,
+        state,
+        measurement: latestValue,
+        time: latestTime,
+        status,
+        isAssigned
+      });
+    }
+
+    res.json({
+      success: true,
+      district: district,
+      sensors: sensors,
+      count: sensors.length
+    });
+
+  } catch (err) {
+    console.error('❌ Error fetching sensors by district:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// Get list of all districts that have sensors
+app.get('/api/districts', async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT DISTINCT district FROM sensors WHERE district IS NOT NULL AND district != '' ORDER BY district`
+    );
+
+    const districts = rows.map(row => row.district);
+
+    res.json({
+      success: true,
+      districts: districts,
+      count: districts.length
+    });
+
+  } catch (err) {
+    console.error('❌ Error fetching districts:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
 // ==================== MOBILE ENDPOINTS ====================
 
 // Get sensors for logged-in user (MOBILE ONLY - shows only user's sensors)
@@ -1322,9 +1441,9 @@ app.get('/api/debug/table/:tableName', async (req, res) => {
   }
 });
 
-// ==================== NEW FEATURES: UNASSIGNED SENSORS & MAPPING ====================
+// ==================== UNASSIGNED SENSORS & MAPPING ====================
 
-// Get unassigned sensors by village (sensors not mapped to any phone number)
+// Get unassigned sensors by village
 app.get('/api/village-sensors/unassigned', async (req, res) => {
   try {
     const { village } = req.query;
@@ -1571,17 +1690,15 @@ app.get('/api/debug/villages', async (req, res) => {
 app.get('/api/sensors/:devEUI/history', async (req, res) => {
   try {
     const { devEUI } = req.params;
-    const { range } = req.query; // e.g., -24h, -7d, -30d, -90d
-    
+    const { range } = req.query;
+
     console.log(`📊 Fetching history for sensor ${devEUI} with range ${range}`);
 
-    // Determine time range
     let rangeValue = '-24h';
     if (range) {
       rangeValue = range;
     }
 
-    // Query InfluxDB for historical data
     const fluxQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: ${rangeValue})
@@ -1660,12 +1777,14 @@ app.listen(PORT, () => {
   console.log('   GET  /api/sensors');
   console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
   console.log('   GET  /api/admin/dashboard');
+  console.log('   GET  /api/sensors/by-district?district=Kasaragod (NEW)');
+  console.log('   GET  /api/districts (NEW)');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
   console.log('   POST /api/verify/resend-otp');
-  console.log('   GET  /api/sensors/unassigned?village=NAME (NEW)');
-  console.log('   POST /api/sensors/map (NEW)');
-  console.log('   GET  /api/debug/villages (NEW)');
+  console.log('   GET  /api/village-sensors/unassigned?village=NAME');
+  console.log('   POST /api/sensors/map');
+  console.log('   GET  /api/debug/villages');
   console.log('══════════════════════════════════════════════════════');
 });
