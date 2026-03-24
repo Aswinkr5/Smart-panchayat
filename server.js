@@ -111,30 +111,16 @@ function getRandomValueForType(type, sensorName) {
   const name = sensorName.toLowerCase();
   
   switch(type) {
-      case 'temperature':
-          return (20 + Math.random() * 15).toFixed(1);
-      case 'humidity':
-          return Math.floor(40 + Math.random() * 50).toString();
-      case 'pressure':
-          return Math.floor(980 + Math.random() * 40).toString();
-      case 'water_level':
-          return (30 + Math.random() * 70).toFixed(1);
-      case 'water_quality':
-          return (6.5 + Math.random() * 2).toFixed(1);
-      case 'air_quality':
-          return Math.floor(50 + Math.random() * 150).toString();
-      case 'ph':
-          return (6.5 + Math.random() * 2).toFixed(1);
-      case 'gas':
-          return Math.floor(10 + Math.random() * 90).toString();
-      case 'turbidity':
-          return (1 + Math.random() * 99).toFixed(1);
-      case 'chlorine':
-          return (0.5 + Math.random() * 1.5).toFixed(2);
-      case 'air':
-          return (20 + Math.random() * 15).toFixed(1);
-      case 'water':
-          return (15 + Math.random() * 15).toFixed(1);
+      case 'temperature': return (20 + Math.random() * 15).toFixed(1);
+      case 'humidity': return Math.floor(40 + Math.random() * 50).toString();
+      case 'pressure': return Math.floor(980 + Math.random() * 40).toString();
+      case 'water_level': return (30 + Math.random() * 70).toFixed(1);
+      case 'water_quality': return (6.5 + Math.random() * 2).toFixed(1);
+      case 'air_quality': return Math.floor(50 + Math.random() * 150).toString();
+      case 'ph': return (6.5 + Math.random() * 2).toFixed(1);
+      case 'gas': return Math.floor(10 + Math.random() * 90).toString();
+      case 'turbidity': return (1 + Math.random() * 99).toFixed(1);
+      case 'chlorine': return (0.5 + Math.random() * 1.5).toFixed(2);
       default:
           if (name.includes('temperature')) return (20 + Math.random() * 15).toFixed(1);
           if (name.includes('humidity')) return Math.floor(40 + Math.random() * 50).toString();
@@ -162,8 +148,6 @@ function getUnitForType(type, sensorName) {
       case 'gas': return 'ppm';
       case 'turbidity': return 'NTU';
       case 'chlorine': return 'mg/L';
-      case 'air': return '°C';
-      case 'water': return '°C';
       default:
           if (name.includes('temperature')) return '°C';
           if (name.includes('humidity')) return '%';
@@ -176,7 +160,7 @@ function getUnitForType(type, sensorName) {
   }
 }
 
-// Generate and write mock data for all sensors - FIXED VERSION
+// Generate and write mock data for all sensors - FIXED
 async function generateMockData() {
   try {
     const [sensors] = await db.query(
@@ -195,28 +179,22 @@ async function generateMockData() {
       const value = getRandomValueForType(sensor.type, sensor.name);
       const unit = getUnitForType(sensor.type, sensor.name);
       
-      // Create a clean field name that will display properly in the app
+      // Create a clean field name based on sensor type
       let fieldName = sensor.type;
       
-      // For general sensors, use a simplified name
-      if (fieldName === 'general') {
-        fieldName = sensor.name.toLowerCase().replace(/[^a-z]/g, '_');
-      }
+      // Format the measurement string as "field: value unit"
+      const measurementString = unit ? `${fieldName}: ${value} ${unit}` : `${fieldName}: ${value}`;
       
-      // Create the measurement string in the format the frontend expects
-      // The frontend expects something like "temperature: 24.3" or "humidity: 65%"
-      const measurementValue = unit ? `${value} ${unit}` : value;
-      
-      // Write to InfluxDB with both field name and formatted measurement
+      // Write to InfluxDB with the formatted measurement string
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
-        .floatField(fieldName, parseFloat(value))
-        .stringField('measurement', `${fieldName}: ${measurementValue}`);
+        .stringField('measurement', measurementString)  // This is what the web dashboard reads
+        .floatField(fieldName, parseFloat(value));      // This is for numerical operations
       
       writeApi.writePoint(point);
       await writeApi.flush();
       
-      console.log(`   ✓ ${sensor.name} (${sensor.type}): ${value} ${unit} -> field: ${fieldName}`);
+      console.log(`   ✓ ${sensor.name} (${sensor.type}): ${measurementString}`);
       generatedCount++;
     }
     
@@ -289,7 +267,6 @@ async function getMockDataStatus() {
 setTimeout(() => {
     startMockDataGenerator();
 }, 5000);
-
 // ==================== MIDDLEWARE ====================
 
 app.use(cors({
@@ -327,7 +304,51 @@ app.use((req, res, next) => {
 async function queryInfluxDB(fluxQuery) {
   try {
     const result = await queryApi.collectRows(fluxQuery);
-    return result || [];
+    
+    // Transform the result to ensure proper formatting for frontend
+    const transformedResult = result.map(row => {
+      // If the row already has a 'measurement' field from InfluxDB
+      if (row.measurement) {
+        // Parse the measurement string to extract field and value
+        const measurementStr = row.measurement;
+        if (measurementStr.includes(':')) {
+          const [field, valuePart] = measurementStr.split(':');
+          return {
+            ...row,
+            _field: field.trim(),
+            _value: valuePart.trim()
+          };
+        }
+        return {
+          ...row,
+          _field: 'value',
+          _value: row.measurement
+        };
+      }
+      
+      // If row has _field and _value directly
+      if (row._field && row._value !== undefined) {
+        return row;
+      }
+      
+      // Fallback: try to find any field that might contain data
+      const possibleFields = Object.keys(row).filter(key => 
+        key !== '_time' && key !== '_measurement' && key !== 'devEUI' && key !== 'result'
+      );
+      
+      if (possibleFields.length > 0) {
+        const field = possibleFields[0];
+        return {
+          ...row,
+          _field: field,
+          _value: row[field]
+        };
+      }
+      
+      return row;
+    });
+    
+    return transformedResult;
   } catch (error) {
     console.error('❌ InfluxDB query error:', error.message);
     return [];
