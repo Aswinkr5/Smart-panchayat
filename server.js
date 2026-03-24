@@ -1437,6 +1437,8 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     const { range } = req.query;
     let rangeValue = range ? range : '-24h';
 
+    console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
+
     // First, get the sensor type
     const [sensorInfo] = await db.query(
       'SELECT type FROM sensors WHERE devEUI = ?',
@@ -1444,7 +1446,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     );
     const sensorType = sensorInfo.length > 0 ? sensorInfo[0].type : 'temperature';
     
-    console.log(`📊 Fetching history for sensor ${devEUI}, type: ${sensorType}, range: ${rangeValue}`);
+    console.log(`📊 Sensor type: ${sensorType}`);
 
     // Query to get all data points in the time range
     const fluxQuery = `
@@ -1452,69 +1454,68 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
         |> range(start: ${rangeValue})
         |> filter(fn: (r) => r._measurement == "sensor_data")
         |> filter(fn: (r) => r.devEUI == "${devEUI}")
-        |> filter(fn: (r) => exists r.${sensorType})
         |> sort(columns: ["_time"], desc: false)
     `;
 
     const rows = await queryInfluxDB(fluxQuery);
     
     console.log(`📊 Found ${rows.length} raw data points for sensor ${devEUI}`);
+    
+    if (rows.length === 0) {
+      console.log(`⚠️ No data points found for sensor ${devEUI}`);
+      return res.json({
+        success: true,
+        history: [],
+        count: 0
+      });
+    }
 
     // Transform to the format the frontend expects with numeric values
-    const history = rows.map(row => {
-      let value = 0;
+    const history = [];
+    
+    for (const row of rows) {
+      let value = null;
+      let fieldName = null;
       
-      // Get the value from the sensor type field
-      if (row[sensorType] !== undefined && row[sensorType] !== null) {
-        value = parseFloat(row[sensorType]) || 0;
-      } else {
-        // Fallback: look for any numeric field
-        const numericFields = Object.keys(row).filter(key => 
-          key !== '_time' && key !== '_measurement' && key !== 'devEUI' && 
-          typeof row[key] === 'number' && row[key] !== null
-        );
-        if (numericFields.length > 0) {
-          value = row[numericFields[0]];
+      // Look for numeric fields in the row
+      for (const [key, val] of Object.entries(row)) {
+        // Skip metadata fields
+        if (key !== '_time' && key !== '_measurement' && key !== 'devEUI' && 
+            key !== 'result' && key !== 'table') {
+          // Check if it's a number
+          if (typeof val === 'number') {
+            value = val;
+            fieldName = key;
+            break;
+          }
+          // Try to parse string as number
+          if (typeof val === 'string') {
+            const num = parseFloat(val);
+            if (!isNaN(num)) {
+              value = num;
+              fieldName = key;
+              break;
+            }
+          }
         }
       }
       
-      return {
-        time: row._time,
-        value: value,
-        field: sensorType
-      };
-    }).filter(h => h.value > 0); // Only include points with valid values
-
-    // If we have too many points, aggregate them for better performance
-    let aggregatedHistory = history;
-    if (history.length > 100) {
-      // Group by hour for 24h range
-      const groupedByHour = {};
-      history.forEach(point => {
-        const hour = new Date(point.time).getHours();
-        const key = new Date(point.time).toISOString().slice(0, 13);
-        if (!groupedByHour[key]) {
-          groupedByHour[key] = { sum: 0, count: 0, time: point.time };
-        }
-        groupedByHour[key].sum += point.value;
-        groupedByHour[key].count++;
-      });
-      
-      aggregatedHistory = Object.values(groupedByHour).map(group => ({
-        time: group.time,
-        value: group.sum / group.count,
-        field: sensorType
-      }));
-      
-      console.log(`📊 Aggregated ${history.length} points to ${aggregatedHistory.length} points`);
+      // Only add if we found a valid value
+      if (value !== null && value > 0) {
+        history.push({
+          time: row._time,
+          value: value,
+          field: fieldName || sensorType
+        });
+      }
     }
 
-    console.log(`✅ Returning ${aggregatedHistory.length} data points for sensor ${devEUI}`);
+    console.log(`✅ Returning ${history.length} valid data points for sensor ${devEUI}`);
 
     res.json({
       success: true,
-      history: aggregatedHistory,
-      count: aggregatedHistory.length
+      history: history,
+      count: history.length
     });
 
   } catch (err) {
