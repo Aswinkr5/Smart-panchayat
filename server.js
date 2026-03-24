@@ -1402,35 +1402,62 @@ app.get('/api/debug/villages', async (req, res) => {
 });
 
 // Get sensor history for graphing
+// Get sensor history for graphing
 app.get('/api/sensors/:devEUI/history', async (req, res) => {
   try {
     const { devEUI } = req.params;
     const { range } = req.query;
     let rangeValue = range ? range : '-24h';
 
-    const fluxQuery = `
-      from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: ${rangeValue})
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        |> filter(fn: (r) => r.devEUI == "${devEUI}")
-        |> sort(columns: ["_time"], desc: false)
-    `;
+    // For better performance and cleaner graph, limit the number of points
+    let fluxQuery;
+    if (rangeValue === '-24h') {
+      // For 24 hours, show points every hour
+      fluxQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: ${rangeValue})
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> aggregateWindow(every: 1h, fn: mean)
+          |> sort(columns: ["_time"], desc: false)
+      `;
+    } else if (rangeValue === '-7d') {
+      // For 7 days, show points every 6 hours
+      fluxQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: ${rangeValue})
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> aggregateWindow(every: 6h, fn: mean)
+          |> sort(columns: ["_time"], desc: false)
+      `;
+    } else {
+      // For longer ranges, show points every day
+      fluxQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: ${rangeValue})
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> aggregateWindow(every: 1d, fn: mean)
+          |> sort(columns: ["_time"], desc: false)
+      `;
+    }
 
     const rows = await queryInfluxDB(fluxQuery);
     
-    // Get the sensor type to know which field to extract
+    // Get the sensor type
     const [sensorInfo] = await db.query(
       'SELECT type FROM sensors WHERE devEUI = ?',
       [devEUI]
     );
     const sensorType = sensorInfo.length > 0 ? sensorInfo[0].type : 'temperature';
     
-    // Transform to the format the frontend expects with numeric values
+    // Transform to the format the frontend expects
     const history = rows.map(row => {
       let value = 0;
       // Try to get the value from the field that matches sensor type
-      if (row[sensorType] !== undefined) {
-        value = parseFloat(row[sensorType]) || 0;
+      if (row[sensorType] !== undefined && typeof row[sensorType] === 'number') {
+        value = row[sensorType];
       } else {
         // Fallback: look for any numeric field
         const numericFields = Object.keys(row).filter(key => 
@@ -1438,7 +1465,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
           typeof row[key] === 'number'
         );
         if (numericFields.length > 0) {
-          value = row[numericFields[0]] || 0;
+          value = row[numericFields[0]];
         }
       }
       
@@ -1449,7 +1476,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       };
     }).filter(h => h.value > 0); // Only include points with valid values
 
-    console.log(`✅ Found ${history.length} historical data points for sensor ${devEUI}`);
+    console.log(`✅ Found ${history.length} aggregated data points for sensor ${devEUI}`);
 
     res.json({
       success: true,
