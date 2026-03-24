@@ -22,13 +22,12 @@ const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.tok
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// MySQL Configuration - Fixed for Render/Railway connection
+// MySQL Configuration
 const mysql = require('mysql2');
 
 console.log('🔧 MySQL Configuration:');
 
 let db;
-// Check if MYSQL_URL is provided (from Railway)
 if (process.env.MYSQL_URL) {
   console.log('   Using MYSQL_URL connection');
   db = mysql.createPool({
@@ -38,7 +37,6 @@ if (process.env.MYSQL_URL) {
     queueLimit: 0
   }).promise();
 } else {
-  // Use individual variables
   console.log('   Host:', process.env.MYSQL_HOST);
   console.log('   Database:', process.env.MYSQL_DATABASE);
   console.log('   Port:', process.env.MYSQL_PORT);
@@ -60,7 +58,6 @@ if (process.env.MYSQL_URL) {
     await db.query('SELECT 1');
     console.log('✅ MySQL database connected successfully');
     
-    // Create system_settings table if not exists
     await db.query(`
       CREATE TABLE IF NOT EXISTS system_settings (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -70,14 +67,12 @@ if (process.env.MYSQL_URL) {
       )
     `);
     
-    // Insert mock data setting if not exists
     await db.query(`
       INSERT INTO system_settings (setting_key, setting_value) 
       VALUES ('mock_data_enabled', 'false')
       ON DUPLICATE KEY UPDATE setting_key = setting_key
     `);
     
-    // Add type column to sensors if not exists
     try {
       await db.query(`
         ALTER TABLE sensors 
@@ -99,14 +94,12 @@ const otpStore = new Map();
 
 // ==================== MOCK DATA GENERATOR ====================
 
-// Configuration for mock data
 const MOCK_CONFIG = {
   enabled: false,
-  interval: 7000, // 7 seconds
+  interval: 7000,
   timer: null
 };
 
-// Define realistic value ranges for different sensor types
 function getRandomValueForType(type, sensorName) {
   const name = sensorName.toLowerCase();
   
@@ -133,7 +126,6 @@ function getRandomValueForType(type, sensorName) {
   }
 }
 
-// Get unit based on sensor type
 function getUnitForType(type, sensorName) {
   const name = sensorName.toLowerCase();
   
@@ -160,7 +152,6 @@ function getUnitForType(type, sensorName) {
   }
 }
 
-// Generate and write mock data for all sensors
 async function generateMockData() {
   try {
     const [sensors] = await db.query(
@@ -179,16 +170,13 @@ async function generateMockData() {
       const value = getRandomValueForType(sensor.type, sensor.name);
       const unit = getUnitForType(sensor.type, sensor.name);
       
-      // Create the field name based on sensor type
       let fieldName = sensor.type;
       if (fieldName === 'water_level') fieldName = 'water_level';
       if (fieldName === 'water_quality') fieldName = 'water_quality';
       if (fieldName === 'air_quality') fieldName = 'air_quality';
       
-      // Create the formatted measurement string for the frontend
       const measurementString = `${fieldName}: ${value} ${unit}`.trim();
       
-      // Write to InfluxDB - store both the numeric value and the formatted string
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
         .floatField(fieldName, parseFloat(value))
@@ -207,6 +195,40 @@ async function generateMockData() {
     
   } catch (error) {
     console.error('❌ Mock data generation error:', error);
+  }
+}
+
+// Generate historical data for past 24 hours
+async function generateHistoricalData() {
+  try {
+    const [sensors] = await db.query('SELECT devEUI, name, type FROM sensors');
+    if (sensors.length === 0) return;
+    
+    console.log('📊 Generating historical data for past 24 hours...');
+    
+    for (const sensor of sensors) {
+      for (let hour = 1; hour <= 24; hour++) {
+        const timestamp = new Date(Date.now() - hour * 3600000);
+        const value = getRandomValueForType(sensor.type, sensor.name);
+        const unit = getUnitForType(sensor.type, sensor.name);
+        
+        let fieldName = sensor.type;
+        const measurementString = `${fieldName}: ${value} ${unit}`.trim();
+        
+        const point = new Point('sensor_data')
+          .tag('devEUI', sensor.devEUI)
+          .floatField(fieldName, parseFloat(value))
+          .stringField('measurement', measurementString)
+          .timestamp(timestamp);
+        
+        writeApi.writePoint(point);
+      }
+      await writeApi.flush();
+      console.log(`   ✓ Historical data generated for ${sensor.name}`);
+    }
+    console.log('✅ Historical data generation complete!');
+  } catch (error) {
+    console.error('❌ Error generating historical data:', error);
   }
 }
 
@@ -235,7 +257,6 @@ async function startMockDataGenerator() {
   }
 }
 
-// Toggle mock data (called from API)
 async function toggleMockData(enabled) {
     try {
         await db.query(
@@ -251,7 +272,6 @@ async function toggleMockData(enabled) {
     }
 }
 
-// Get mock data status
 async function getMockDataStatus() {
     try {
         const [rows] = await db.query(
@@ -269,11 +289,12 @@ async function getMockDataStatus() {
 // Start the generator after database connection
 setTimeout(() => {
     startMockDataGenerator();
+    // Uncomment this line ONCE to generate historical data, then comment it out
+    // generateHistoricalData();
 }, 5000);
 
 // ==================== MIDDLEWARE ====================
 
-// Updated CORS configuration
 app.use(cors({
   origin: '*',
   credentials: true,
@@ -281,7 +302,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With']
 }));
 
-// Also add these headers explicitly
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -307,7 +327,6 @@ app.use((req, res, next) => {
 
 // ==================== HELPER FUNCTIONS ====================
 
-// Query InfluxDB helper
 async function queryInfluxDB(fluxQuery) {
   try {
     const result = await queryApi.collectRows(fluxQuery);
@@ -318,7 +337,6 @@ async function queryInfluxDB(fluxQuery) {
   }
 }
 
-// Write to InfluxDB helper
 async function writeToInfluxDB(measurement, tags, fields) {
   try {
     const point = new Point(measurement);
@@ -345,8 +363,7 @@ async function writeToInfluxDB(measurement, tags, fields) {
   }
 }
 
-// Get active sensor count from InfluxDB
-const SENSOR_ACTIVE_THRESHOLD = 20; // seconds
+const SENSOR_ACTIVE_THRESHOLD = 20;
 
 async function getActiveSensorCount() {
   const query = `
@@ -367,7 +384,6 @@ async function getActiveSensorCount() {
   }).length;
 }
 
-// Get all active sensors from InfluxDB
 async function getActiveSensors() {
   const query = `
     from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -382,7 +398,6 @@ async function getActiveSensors() {
   return Array.from(unique);
 }
 
-// Determine sensor type from name
 function determineSensorType(name) {
     const lowerName = name.toLowerCase();
     if (lowerName.includes('temperature')) return 'temperature';
@@ -402,7 +417,6 @@ function determineSensorType(name) {
 
 // ==================== API ROUTES ====================
 
-// Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({
     success: true,
@@ -411,7 +425,6 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Health check
 app.get('/api/health', async (req, res) => {
   try {
     await db.query('SELECT 1');
@@ -573,7 +586,6 @@ app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
   }
 });
 
-// Get sensors for a specific villager
 app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
   try {
     const { aadhaar } = req.params;
@@ -641,7 +653,6 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
 // ==================== SENSOR MANAGEMENT ====================
 
-// Get all sensors
 app.get('/api/sensors', async (req, res) => {
   try {
     const [sensorRows] = await db.query(
@@ -698,7 +709,6 @@ app.get('/api/sensors', async (req, res) => {
   }
 });
 
-// Get single sensor
 app.get('/api/sensors/:devEUI', async (req, res) => {
   try {
     const { devEUI } = req.params;
@@ -724,7 +734,6 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// Add new sensor
 app.post('/api/sensors', async (req, res) => {
   const { devEUI, deviceName, type, village, panchayat, district, state, phone } = req.body;
 
@@ -765,7 +774,6 @@ app.post('/api/sensors', async (req, res) => {
   }
 });
 
-// Update sensor
 app.put('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
   const { deviceName, type, village, panchayat, district, state, phone } = req.body;
@@ -799,7 +807,6 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// Delete sensor
 app.delete('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
 
@@ -1042,7 +1049,6 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
 // ==================== MOBILE AUTHENTICATION ====================
 
-// Aadhaar login
 app.post('/api/login', async (req, res) => {
   const { aadhaarNumber } = req.body;
   if (!aadhaarNumber || aadhaarNumber.length !== 12) {
@@ -1063,7 +1069,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Check phone number exists
 app.post('/api/verify/check-phone', async (req, res) => {
   try {
     const { phone } = req.body;
@@ -1084,7 +1089,6 @@ app.post('/api/verify/check-phone', async (req, res) => {
   }
 });
 
-// Send OTP
 app.post('/api/verify/send-otp', async (req, res) => {
   try {
     const { phone } = req.body;
@@ -1107,7 +1111,6 @@ app.post('/api/verify/send-otp', async (req, res) => {
   }
 });
 
-// Verify OTP
 app.post('/api/verify/check-otp', async (req, res) => {
   try {
     const { phone, otp } = req.body;
@@ -1164,7 +1167,6 @@ app.post('/api/verify/check-otp', async (req, res) => {
   }
 });
 
-// Resend OTP
 app.post('/api/verify/resend-otp', async (req, res) => {
   try {
     const { phone } = req.body;
@@ -1183,7 +1185,6 @@ app.post('/api/verify/resend-otp', async (req, res) => {
   }
 });
 
-// Validate token
 app.get('/api/auth/validate', async (req, res) => {
   const token = req.headers.authorization;
   if (!token) return res.json({ success: false, error: 'No token' });
@@ -1226,6 +1227,34 @@ app.get('/api/debug/latest-sensor-data', async (req, res) => {
       });
     }
     res.json({ success: true, data: results });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/debug/sensor-history/:devEUI', async (req, res) => {
+  try {
+    const { devEUI } = req.params;
+    const { range } = req.query;
+    const rangeValue = range || '-1h';
+    
+    const fluxQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: ${rangeValue})
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r.devEUI == "${devEUI}")
+        |> sort(columns: ["_time"], desc: false)
+    `;
+    
+    const result = await queryInfluxDB(fluxQuery);
+    
+    res.json({
+      success: true,
+      devEUI: devEUI,
+      range: rangeValue,
+      count: result.length,
+      data: result
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -1378,21 +1407,42 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     const { range } = req.query;
     let rangeValue = range ? range : '-24h';
 
-    const fluxQuery = `
-      from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: ${rangeValue})
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        |> filter(fn: (r) => r.devEUI == "${devEUI}")
-        |> aggregateWindow(every: 1h, fn: mean)
-        |> sort(columns: ["_time"], desc: false)
-    `;
+    let fluxQuery;
+    if (rangeValue === '-24h' || rangeValue === '-1h') {
+      fluxQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: ${rangeValue})
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> sort(columns: ["_time"], desc: false)
+      `;
+    } else {
+      fluxQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: ${rangeValue})
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> aggregateWindow(every: 1h, fn: mean)
+          |> sort(columns: ["_time"], desc: false)
+      `;
+    }
 
     const rows = await queryInfluxDB(fluxQuery);
     const history = rows.map(row => ({ time: row._time, value: row._value, field: row._field }));
-    res.json({ success: true, history, count: history.length });
+
+    console.log(`✅ Found ${history.length} historical data points for sensor ${devEUI} with range ${rangeValue}`);
+
+    res.json({
+      success: true,
+      history: history,
+      count: history.length
+    });
   } catch (err) {
     console.error('❌ Error fetching sensor history:', err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
@@ -1448,6 +1498,7 @@ app.listen(PORT, () => {
   console.log('   GET  /api/sensors/by-district?district=Kasaragod');
   console.log('   GET  /api/districts');
   console.log('   GET  /api/debug/latest-sensor-data');
+  console.log('   GET  /api/debug/sensor-history/:devEUI');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
