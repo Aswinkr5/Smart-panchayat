@@ -1440,7 +1440,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
 
     console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
 
-    // First, get the sensor type
+    // Get the sensor type
     const [sensorInfo] = await db.query(
       'SELECT type FROM sensors WHERE devEUI = ?',
       [devEUI]
@@ -1449,7 +1449,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     
     console.log(`📊 Sensor type: ${sensorType}`);
 
-    // Query to get all data points - FIXED: Don't use exists, just get all fields
+    // Query InfluxDB - get all fields
     const fluxQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: ${rangeValue})
@@ -1460,83 +1460,63 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
 
     const rows = await queryInfluxDB(fluxQuery);
     
-    console.log(`📊 Found ${rows.length} raw data points for sensor ${devEUI}`);
+    console.log(`📊 Found ${rows.length} raw records`);
     
     if (rows.length === 0) {
-      console.log(`⚠️ No data points found for sensor ${devEUI}`);
-      return res.json({
-        success: true,
-        history: [],
-        count: 0
-      });
+      return res.json({ success: true, history: [], count: 0 });
     }
 
-    // Log the first row to see what fields are available
-    if (rows.length > 0) {
-      console.log(`📊 First row fields: ${Object.keys(rows[0]).join(', ')}`);
-      console.log(`📊 First row data: ${JSON.stringify(rows[0])}`);
-    }
-
-    // Transform to the format the frontend expects with numeric values
+    // Extract numeric values
     const history = [];
     
     for (const row of rows) {
       let value = null;
-      let fieldName = null;
       
-      // Look for numeric fields that match the sensor type
-      // Skip metadata fields: _time, _measurement, devEUI, result, table, _start, _stop
-      const skipFields = ['_time', '_measurement', 'devEUI', 'result', 'table', '_start', '_stop', '_field', '_value'];
-      
-      for (const [key, val] of Object.entries(row)) {
-        if (!skipFields.includes(key)) {
-          // Check if it's a number
-          if (typeof val === 'number') {
-            value = val;
-            fieldName = key;
-            break;
-          }
-          // Try to parse string as number
-          if (typeof val === 'string') {
-            const num = parseFloat(val);
-            if (!isNaN(num) && num > 0) {
-              value = num;
-              fieldName = key;
-              break;
-            }
-          }
+      // Check if this is a numeric field (table 1 format)
+      if (row._field === sensorType && row._value !== undefined) {
+        // This is the newer format with numeric values
+        value = parseFloat(row._value);
+      }
+      // Check for direct numeric field
+      else if (row[sensorType] !== undefined && typeof row[sensorType] === 'number') {
+        value = row[sensorType];
+      }
+      // Check for generic numeric value field
+      else if (row.value !== undefined && typeof row.value === 'number') {
+        value = row.value;
+      }
+      // Check for string measurement format (older format)
+      else if (row.measurement && typeof row.measurement === 'string') {
+        const match = row.measurement.match(/(\d+(?:\.\d+)?)/);
+        if (match) {
+          value = parseFloat(match[1]);
         }
       }
-      
-      // Also check if there's a field that matches the sensor type
-      if (value === null && row[sensorType] !== undefined) {
+      // Also check if the row has a field that matches the sensor type with numeric value
+      else if (row[sensorType] !== undefined) {
         const val = row[sensorType];
         if (typeof val === 'number') {
           value = val;
-          fieldName = sensorType;
         } else if (typeof val === 'string') {
           const num = parseFloat(val);
-          if (!isNaN(num)) {
-            value = num;
-            fieldName = sensorType;
-          }
+          if (!isNaN(num)) value = num;
         }
       }
       
-      // Only add if we found a valid value
-      if (value !== null && value > 0) {
+      // Only add valid numeric values (not the string measurement ones)
+      if (value !== null && !isNaN(value) && value > 0) {
         history.push({
           time: row._time,
           value: value,
-          field: fieldName || sensorType
+          field: sensorType
         });
       }
     }
 
-    console.log(`✅ Returning ${history.length} valid data points for sensor ${devEUI}`);
-    
+    // Sort by time (already sorted from query)
+    console.log(`✅ Returning ${history.length} valid numeric data points`);
     if (history.length > 0) {
-      console.log(`📊 First value: ${history[0].value}, Last value: ${history[history.length-1].value}`);
+      console.log(`📊 Values: ${history.slice(0, 10).map(h => h.value).join(', ')}...`);
     }
 
     res.json({
