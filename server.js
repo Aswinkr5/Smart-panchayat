@@ -59,6 +59,25 @@ if (process.env.MYSQL_URL) {
   try {
     await db.query('SELECT 1');
     console.log('✅ MySQL database connected successfully');
+    
+    // Create system_settings table if not exists
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        setting_key VARCHAR(100) UNIQUE NOT NULL,
+        setting_value TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Insert mock data setting if not exists
+    await db.query(`
+      INSERT INTO system_settings (setting_key, setting_value) 
+      VALUES ('mock_data_enabled', 'false')
+      ON DUPLICATE KEY UPDATE setting_key = setting_key
+    `);
+    
+    console.log('✅ System settings table ready');
   } catch (error) {
     console.error('❌ MySQL connection failed:', error.message);
   }
@@ -66,6 +85,162 @@ if (process.env.MYSQL_URL) {
 
 // ==================== OTP STORE ====================
 const otpStore = new Map();
+
+// ==================== MOCK DATA GENERATOR ====================
+
+// Configuration for mock data
+const MOCK_CONFIG = {
+    enabled: false,
+    interval: 15000, // 15 seconds
+    timer: null
+};
+
+// Define value ranges for different sensor types
+function getRandomValue(sensorName) {
+    const name = sensorName.toLowerCase();
+    
+    if (name.includes('temperature')) {
+        return (20 + Math.random() * 15).toFixed(1); // 20-35°C
+    }
+    if (name.includes('humidity')) {
+        return (40 + Math.random() * 50).toFixed(0); // 40-90%
+    }
+    if (name.includes('water') && name.includes('level')) {
+        return (30 + Math.random() * 70).toFixed(1); // 30-100%
+    }
+    if (name.includes('water') && name.includes('quality')) {
+        return (6.5 + Math.random() * 2).toFixed(1); // 6.5-8.5 pH
+    }
+    if (name.includes('pressure')) {
+        return (980 + Math.random() * 40).toFixed(0); // 980-1020 hPa
+    }
+    if (name.includes('air') && name.includes('quality')) {
+        return (50 + Math.random() * 150).toFixed(0); // 50-200 AQI
+    }
+    if (name.includes('ph')) {
+        return (6.5 + Math.random() * 2).toFixed(1);
+    }
+    if (name.includes('flow')) {
+        return (10 + Math.random() * 90).toFixed(1);
+    }
+    // Default random value
+    return (10 + Math.random() * 90).toFixed(1);
+}
+
+// Get unit based on sensor name
+function getUnit(sensorName) {
+    const name = sensorName.toLowerCase();
+    if (name.includes('temperature')) return '°C';
+    if (name.includes('humidity')) return '%';
+    if (name.includes('water') && name.includes('level')) return '%';
+    if (name.includes('water') && name.includes('quality')) return 'pH';
+    if (name.includes('pressure')) return 'hPa';
+    if (name.includes('air') && name.includes('quality')) return 'AQI';
+    if (name.includes('ph')) return 'pH';
+    if (name.includes('flow')) return 'L/s';
+    return '';
+}
+
+// Generate and write mock data for all sensors
+async function generateMockData() {
+    try {
+        // Get all sensors
+        const [sensors] = await db.query(
+            'SELECT devEUI, name FROM sensors ORDER BY id DESC'
+        );
+        
+        if (sensors.length === 0) {
+            console.log('⚠️ No sensors found to generate mock data');
+            return;
+        }
+        
+        console.log(`🎲 Generating mock data for ${sensors.length} sensors...`);
+        
+        for (const sensor of sensors) {
+            const value = getRandomValue(sensor.name);
+            const unit = getUnit(sensor.name);
+            const fieldName = unit ? sensor.name : 'value';
+            
+            // Write to InfluxDB
+            await writeToInfluxDB(
+                'sensor_data',
+                { devEUI: sensor.devEUI },
+                { _field: fieldName, _value: value.toString() }
+            );
+            
+            console.log(`   ✓ ${sensor.name}: ${value} ${unit}`);
+        }
+        
+        console.log('✅ Mock data generated successfully');
+        
+    } catch (error) {
+        console.error('❌ Mock data generation error:', error);
+    }
+}
+
+// Start/Stop mock data generator
+async function startMockDataGenerator() {
+    // Check if mock data is enabled in database
+    try {
+        const [rows] = await db.query(
+            "SELECT setting_value FROM system_settings WHERE setting_key = 'mock_data_enabled'"
+        );
+        
+        if (rows.length > 0) {
+            MOCK_CONFIG.enabled = rows[0].setting_value === 'true';
+        }
+        
+        if (MOCK_CONFIG.enabled && !MOCK_CONFIG.timer) {
+            console.log('🎲 Starting mock data generator...');
+            // Generate immediately
+            await generateMockData();
+            // Then set interval
+            MOCK_CONFIG.timer = setInterval(generateMockData, MOCK_CONFIG.interval);
+        } else if (!MOCK_CONFIG.enabled && MOCK_CONFIG.timer) {
+            console.log('🛑 Stopping mock data generator...');
+            clearInterval(MOCK_CONFIG.timer);
+            MOCK_CONFIG.timer = null;
+        }
+    } catch (error) {
+        console.error('❌ Error checking mock data status:', error);
+    }
+}
+
+// Toggle mock data (called from API)
+async function toggleMockData(enabled) {
+    try {
+        await db.query(
+            "UPDATE system_settings SET setting_value = ? WHERE setting_key = 'mock_data_enabled'",
+            [enabled ? 'true' : 'false']
+        );
+        MOCK_CONFIG.enabled = enabled;
+        await startMockDataGenerator();
+        return { success: true, enabled: MOCK_CONFIG.enabled };
+    } catch (error) {
+        console.error('❌ Error toggling mock data:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Get mock data status
+async function getMockDataStatus() {
+    try {
+        const [rows] = await db.query(
+            "SELECT setting_value FROM system_settings WHERE setting_key = 'mock_data_enabled'"
+        );
+        return {
+            enabled: rows.length > 0 ? rows[0].setting_value === 'true' : false,
+            interval: MOCK_CONFIG.interval / 1000
+        };
+    } catch (error) {
+        return { enabled: false, interval: 15 };
+    }
+}
+
+// Start the generator after database connection
+setTimeout(() => {
+    startMockDataGenerator();
+}, 5000);
 
 // ==================== MIDDLEWARE ====================
 
@@ -210,6 +385,51 @@ app.get('/api/health', async (req, res) => {
       message: error.message
     });
   }
+});
+
+// ==================== MOCK DATA CONTROL ENDPOINTS ====================
+
+// Get mock data status
+app.get('/api/admin/mock-status', async (req, res) => {
+    try {
+        const status = await getMockDataStatus();
+        res.json({
+            success: true,
+            ...status
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Enable mock data
+app.post('/api/admin/mock-enable', async (req, res) => {
+    try {
+        const result = await toggleMockData(true);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Disable mock data
+app.post('/api/admin/mock-disable', async (req, res) => {
+    try {
+        const result = await toggleMockData(false);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Generate mock data once (manual trigger)
+app.post('/api/admin/mock-generate', async (req, res) => {
+    try {
+        await generateMockData();
+        res.json({ success: true, message: 'Mock data generated' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // ==================== VILLAGER MANAGEMENT (MySQL) ====================
@@ -707,7 +927,7 @@ app.delete('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// ==================== DISTRICT-BASED SENSOR QUERY (NEW) ====================
+// ==================== DISTRICT-BASED SENSOR QUERY ====================
 
 // Get sensors by district
 app.get('/api/sensors/by-district', async (req, res) => {
@@ -1777,8 +1997,12 @@ app.listen(PORT, () => {
   console.log('   GET  /api/sensors');
   console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
   console.log('   GET  /api/admin/dashboard');
-  console.log('   GET  /api/sensors/by-district?district=Kasaragod (NEW)');
-  console.log('   GET  /api/districts (NEW)');
+  console.log('   GET  /api/admin/mock-status (NEW)');
+  console.log('   POST /api/admin/mock-enable (NEW)');
+  console.log('   POST /api/admin/mock-disable (NEW)');
+  console.log('   POST /api/admin/mock-generate (NEW)');
+  console.log('   GET  /api/sensors/by-district?district=Kasaragod');
+  console.log('   GET  /api/districts');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
@@ -1787,4 +2011,6 @@ app.listen(PORT, () => {
   console.log('   POST /api/sensors/map');
   console.log('   GET  /api/debug/villages');
   console.log('══════════════════════════════════════════════════════');
+  console.log('🎲 Mock Data Generator: Disabled by default');
+  console.log('   Enable via Admin Dashboard or POST /api/admin/mock-enable');
 });
