@@ -101,66 +101,71 @@ const otpStore = new Map();
 
 // Configuration for mock data
 const MOCK_CONFIG = {
-    enabled: false,
-    interval: 15000, // 15 seconds
-    timer: null
+  enabled: false,
+  interval: 7000, // 7 seconds (changed from 15000)
+  timer: null
 };
 
-// Get sensor type from database
-async function getSensorType(devEUI) {
-  try {
-    const [rows] = await db.query(
-      `SELECT type FROM sensors WHERE devEUI = ?`,
-      [devEUI]
-    );
-    return rows.length > 0 ? rows[0].type : 'general';
-  } catch (error) {
-    return 'general';
-  }
-}
-
-// Define value ranges for different sensor types
+// Define realistic value ranges for different sensor types
 function getRandomValueForType(type, sensorName) {
-    const name = sensorName.toLowerCase();
-    
-    switch(type) {
+  const name = sensorName.toLowerCase();
+  
+  switch(type) {
       case 'temperature':
-        return (20 + Math.random() * 15).toFixed(1); // 20-35°C
+          // 20-35°C with one decimal
+          return (20 + Math.random() * 15).toFixed(1);
       case 'humidity':
-        return (40 + Math.random() * 50).toFixed(0); // 40-90%
+          // 40-90% with no decimal (integer)
+          return Math.floor(40 + Math.random() * 50).toString();
       case 'pressure':
-        return (980 + Math.random() * 40).toFixed(0); // 980-1020 hPa
+          // 980-1020 hPa (integer)
+          return Math.floor(980 + Math.random() * 40).toString();
       case 'water_level':
-        return (30 + Math.random() * 70).toFixed(1); // 30-100%
+          // 30-100% with one decimal
+          return (30 + Math.random() * 70).toFixed(1);
       case 'water_quality':
-        return (6.5 + Math.random() * 2).toFixed(1); // 6.5-8.5 pH
+          // 6.5-8.5 pH with one decimal
+          return (6.5 + Math.random() * 2).toFixed(1);
       case 'air_quality':
-        return (50 + Math.random() * 150).toFixed(0); // 50-200 AQI
+          // 50-200 AQI (integer)
+          return Math.floor(50 + Math.random() * 150).toString();
       case 'ph':
-        return (6.5 + Math.random() * 2).toFixed(1);
+          // 6.5-8.5 pH with one decimal
+          return (6.5 + Math.random() * 2).toFixed(1);
       case 'gas':
-        return (10 + Math.random() * 90).toFixed(0); // 10-100 ppm
+          // 10-100 ppm (integer)
+          return Math.floor(10 + Math.random() * 90).toString();
       case 'turbidity':
-        return (1 + Math.random() * 99).toFixed(1); // 1-100 NTU
+          // 1-100 NTU with one decimal
+          return (1 + Math.random() * 99).toFixed(1);
       case 'chlorine':
-        return (0.5 + Math.random() * 1.5).toFixed(2); // 0.5-2.0 mg/L
+          // 0.5-2.0 mg/L with two decimals
+          return (0.5 + Math.random() * 1.5).toFixed(2);
+      case 'air':
+          // 20-35°C for air temperature
+          return (20 + Math.random() * 15).toFixed(1);
+      case 'water':
+          // 15-30°C for water temperature
+          return (15 + Math.random() * 15).toFixed(1);
       default:
-        if (name.includes('temperature')) return (20 + Math.random() * 15).toFixed(1);
-        if (name.includes('humidity')) return (40 + Math.random() * 50).toFixed(0);
-        if (name.includes('water') && name.includes('level')) return (30 + Math.random() * 70).toFixed(1);
-        if (name.includes('water') && name.includes('quality')) return (6.5 + Math.random() * 2).toFixed(1);
-        if (name.includes('pressure')) return (980 + Math.random() * 40).toFixed(0);
-        if (name.includes('air') && name.includes('quality')) return (50 + Math.random() * 150).toFixed(0);
-        if (name.includes('ph')) return (6.5 + Math.random() * 2).toFixed(1);
-        return (10 + Math.random() * 90).toFixed(1);
-    }
+          // Fallback based on sensor name
+          if (name.includes('temperature')) return (20 + Math.random() * 15).toFixed(1);
+          if (name.includes('humidity')) return Math.floor(40 + Math.random() * 50).toString();
+          if (name.includes('water') && name.includes('level')) return (30 + Math.random() * 70).toFixed(1);
+          if (name.includes('water') && name.includes('quality')) return (6.5 + Math.random() * 2).toFixed(1);
+          if (name.includes('pressure')) return Math.floor(980 + Math.random() * 40).toString();
+          if (name.includes('air') && name.includes('quality')) return Math.floor(50 + Math.random() * 150).toString();
+          if (name.includes('ph')) return (6.5 + Math.random() * 2).toFixed(1);
+          // Default random value between 10-100 with one decimal
+          return (10 + Math.random() * 90).toFixed(1);
+  }
 }
 
 // Get unit based on sensor type
 function getUnitForType(type, sensorName) {
-    const name = sensorName.toLowerCase();
-    
-    switch(type) {
+  const name = sensorName.toLowerCase();
+  
+  switch(type) {
       case 'temperature': return '°C';
       case 'humidity': return '%';
       case 'pressure': return 'hPa';
@@ -171,83 +176,101 @@ function getUnitForType(type, sensorName) {
       case 'gas': return 'ppm';
       case 'turbidity': return 'NTU';
       case 'chlorine': return 'mg/L';
+      case 'air': return '°C';
+      case 'water': return '°C';
       default:
-        if (name.includes('temperature')) return '°C';
-        if (name.includes('humidity')) return '%';
-        if (name.includes('water') && name.includes('level')) return '%';
-        if (name.includes('water') && name.includes('quality')) return 'pH';
-        if (name.includes('pressure')) return 'hPa';
-        if (name.includes('air') && name.includes('quality')) return 'AQI';
-        if (name.includes('ph')) return 'pH';
-        return '';
-    }
+          if (name.includes('temperature')) return '°C';
+          if (name.includes('humidity')) return '%';
+          if (name.includes('water') && name.includes('level')) return '%';
+          if (name.includes('water') && name.includes('quality')) return 'pH';
+          if (name.includes('pressure')) return 'hPa';
+          if (name.includes('air') && name.includes('quality')) return 'AQI';
+          if (name.includes('ph')) return 'pH';
+          return '';
+  }
+}
+
+// Get field name for InfluxDB
+function getFieldName(sensorName, unit) {
+  // Clean the sensor name to create a proper field name
+  let fieldName = sensorName.toLowerCase()
+      .replace(/[^a-z0-9]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
+  
+  if (unit) {
+      fieldName = `${fieldName}_${unit.replace(/[^a-z0-9]/gi, '')}`;
+  }
+  
+  return fieldName;
 }
 
 // Generate and write mock data for all sensors
 async function generateMockData() {
-    try {
-        // Get all sensors with their types
-        const [sensors] = await db.query(
-            'SELECT devEUI, name, type FROM sensors ORDER BY id DESC'
-        );
-        
-        if (sensors.length === 0) {
-            console.log('⚠️ No sensors found to generate mock data');
-            return;
-        }
-        
-        console.log(`🎲 Generating mock data for ${sensors.length} sensors...`);
-        
-        for (const sensor of sensors) {
-            const value = getRandomValueForType(sensor.type, sensor.name);
-            const unit = getUnitForType(sensor.type, sensor.name);
-            const fieldName = unit ? `${sensor.name} (${unit})` : sensor.name;
-            
-            // Write to InfluxDB
-            await writeToInfluxDB(
-                'sensor_data',
-                { devEUI: sensor.devEUI },
-                { _field: fieldName, _value: value.toString() }
-            );
-            
-            console.log(`   ✓ ${sensor.name} (${sensor.type}): ${value} ${unit}`);
-        }
-        
-        console.log('✅ Mock data generated successfully');
-        
-    } catch (error) {
-        console.error('❌ Mock data generation error:', error);
-    }
+  try {
+      // Get all sensors with their types
+      const [sensors] = await db.query(
+          'SELECT devEUI, name, type FROM sensors ORDER BY id DESC'
+      );
+      
+      if (sensors.length === 0) {
+          console.log('⚠️ No sensors found to generate mock data');
+          return;
+      }
+      
+      console.log(`🎲 Generating mock data for ${sensors.length} sensors...`);
+      let generatedCount = 0;
+      
+      for (const sensor of sensors) {
+          const value = getRandomValueForType(sensor.type, sensor.name);
+          const unit = getUnitForType(sensor.type, sensor.name);
+          const fieldName = getFieldName(sensor.name, unit);
+          
+          // Write to InfluxDB
+          await writeToInfluxDB(
+              'sensor_data',
+              { devEUI: sensor.devEUI },
+              { _field: fieldName, _value: value.toString() }
+          );
+          
+          console.log(`   ✓ ${sensor.name} (${sensor.type}): ${value} ${unit}`);
+          generatedCount++;
+      }
+      
+      console.log(`✅ Mock data generated successfully for ${generatedCount} sensors at ${new Date().toLocaleTimeString()}`);
+      
+  } catch (error) {
+      console.error('❌ Mock data generation error:', error);
+  }
 }
 
 // Start/Stop mock data generator
 async function startMockDataGenerator() {
-    // Check if mock data is enabled in database
-    try {
-        const [rows] = await db.query(
-            "SELECT setting_value FROM system_settings WHERE setting_key = 'mock_data_enabled'"
-        );
-        
-        if (rows.length > 0) {
-            MOCK_CONFIG.enabled = rows[0].setting_value === 'true';
-        }
-        
-        if (MOCK_CONFIG.enabled && !MOCK_CONFIG.timer) {
-            console.log('🎲 Starting mock data generator...');
-            // Generate immediately
-            await generateMockData();
-            // Then set interval
-            MOCK_CONFIG.timer = setInterval(generateMockData, MOCK_CONFIG.interval);
-        } else if (!MOCK_CONFIG.enabled && MOCK_CONFIG.timer) {
-            console.log('🛑 Stopping mock data generator...');
-            clearInterval(MOCK_CONFIG.timer);
-            MOCK_CONFIG.timer = null;
-        }
-    } catch (error) {
-        console.error('❌ Error checking mock data status:', error);
-    }
+  // Check if mock data is enabled in database
+  try {
+      const [rows] = await db.query(
+          "SELECT setting_value FROM system_settings WHERE setting_key = 'mock_data_enabled'"
+      );
+      
+      if (rows.length > 0) {
+          MOCK_CONFIG.enabled = rows[0].setting_value === 'true';
+      }
+      
+      if (MOCK_CONFIG.enabled && !MOCK_CONFIG.timer) {
+          console.log('🎲 Starting mock data generator (every 7 seconds)...');
+          // Generate immediately
+          await generateMockData();
+          // Then set interval (7 seconds)
+          MOCK_CONFIG.timer = setInterval(generateMockData, MOCK_CONFIG.interval);
+      } else if (!MOCK_CONFIG.enabled && MOCK_CONFIG.timer) {
+          console.log('🛑 Stopping mock data generator...');
+          clearInterval(MOCK_CONFIG.timer);
+          MOCK_CONFIG.timer = null;
+      }
+  } catch (error) {
+      console.error('❌ Error checking mock data status:', error);
+  }
 }
-
 // Toggle mock data (called from API)
 async function toggleMockData(enabled) {
     try {
