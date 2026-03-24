@@ -77,6 +77,17 @@ if (process.env.MYSQL_URL) {
       ON DUPLICATE KEY UPDATE setting_key = setting_key
     `);
     
+    // Add type column to sensors if not exists
+    try {
+      await db.query(`
+        ALTER TABLE sensors 
+        ADD COLUMN IF NOT EXISTS type VARCHAR(50) DEFAULT 'general' AFTER name
+      `);
+      console.log('✅ Sensors table updated with type column');
+    } catch (error) {
+      console.log('ℹ️ Type column may already exist');
+    }
+    
     console.log('✅ System settings table ready');
   } catch (error) {
     console.error('❌ MySQL connection failed:', error.message);
@@ -95,58 +106,89 @@ const MOCK_CONFIG = {
     timer: null
 };
 
-// Define value ranges for different sensor types
-function getRandomValue(sensorName) {
-    const name = sensorName.toLowerCase();
-    
-    if (name.includes('temperature')) {
-        return (20 + Math.random() * 15).toFixed(1); // 20-35°C
-    }
-    if (name.includes('humidity')) {
-        return (40 + Math.random() * 50).toFixed(0); // 40-90%
-    }
-    if (name.includes('water') && name.includes('level')) {
-        return (30 + Math.random() * 70).toFixed(1); // 30-100%
-    }
-    if (name.includes('water') && name.includes('quality')) {
-        return (6.5 + Math.random() * 2).toFixed(1); // 6.5-8.5 pH
-    }
-    if (name.includes('pressure')) {
-        return (980 + Math.random() * 40).toFixed(0); // 980-1020 hPa
-    }
-    if (name.includes('air') && name.includes('quality')) {
-        return (50 + Math.random() * 150).toFixed(0); // 50-200 AQI
-    }
-    if (name.includes('ph')) {
-        return (6.5 + Math.random() * 2).toFixed(1);
-    }
-    if (name.includes('flow')) {
-        return (10 + Math.random() * 90).toFixed(1);
-    }
-    // Default random value
-    return (10 + Math.random() * 90).toFixed(1);
+// Get sensor type from database
+async function getSensorType(devEUI) {
+  try {
+    const [rows] = await db.query(
+      `SELECT type FROM sensors WHERE devEUI = ?`,
+      [devEUI]
+    );
+    return rows.length > 0 ? rows[0].type : 'general';
+  } catch (error) {
+    return 'general';
+  }
 }
 
-// Get unit based on sensor name
-function getUnit(sensorName) {
+// Define value ranges for different sensor types
+function getRandomValueForType(type, sensorName) {
     const name = sensorName.toLowerCase();
-    if (name.includes('temperature')) return '°C';
-    if (name.includes('humidity')) return '%';
-    if (name.includes('water') && name.includes('level')) return '%';
-    if (name.includes('water') && name.includes('quality')) return 'pH';
-    if (name.includes('pressure')) return 'hPa';
-    if (name.includes('air') && name.includes('quality')) return 'AQI';
-    if (name.includes('ph')) return 'pH';
-    if (name.includes('flow')) return 'L/s';
-    return '';
+    
+    switch(type) {
+      case 'temperature':
+        return (20 + Math.random() * 15).toFixed(1); // 20-35°C
+      case 'humidity':
+        return (40 + Math.random() * 50).toFixed(0); // 40-90%
+      case 'pressure':
+        return (980 + Math.random() * 40).toFixed(0); // 980-1020 hPa
+      case 'water_level':
+        return (30 + Math.random() * 70).toFixed(1); // 30-100%
+      case 'water_quality':
+        return (6.5 + Math.random() * 2).toFixed(1); // 6.5-8.5 pH
+      case 'air_quality':
+        return (50 + Math.random() * 150).toFixed(0); // 50-200 AQI
+      case 'ph':
+        return (6.5 + Math.random() * 2).toFixed(1);
+      case 'gas':
+        return (10 + Math.random() * 90).toFixed(0); // 10-100 ppm
+      case 'turbidity':
+        return (1 + Math.random() * 99).toFixed(1); // 1-100 NTU
+      case 'chlorine':
+        return (0.5 + Math.random() * 1.5).toFixed(2); // 0.5-2.0 mg/L
+      default:
+        if (name.includes('temperature')) return (20 + Math.random() * 15).toFixed(1);
+        if (name.includes('humidity')) return (40 + Math.random() * 50).toFixed(0);
+        if (name.includes('water') && name.includes('level')) return (30 + Math.random() * 70).toFixed(1);
+        if (name.includes('water') && name.includes('quality')) return (6.5 + Math.random() * 2).toFixed(1);
+        if (name.includes('pressure')) return (980 + Math.random() * 40).toFixed(0);
+        if (name.includes('air') && name.includes('quality')) return (50 + Math.random() * 150).toFixed(0);
+        if (name.includes('ph')) return (6.5 + Math.random() * 2).toFixed(1);
+        return (10 + Math.random() * 90).toFixed(1);
+    }
+}
+
+// Get unit based on sensor type
+function getUnitForType(type, sensorName) {
+    const name = sensorName.toLowerCase();
+    
+    switch(type) {
+      case 'temperature': return '°C';
+      case 'humidity': return '%';
+      case 'pressure': return 'hPa';
+      case 'water_level': return '%';
+      case 'water_quality': return 'pH';
+      case 'air_quality': return 'AQI';
+      case 'ph': return 'pH';
+      case 'gas': return 'ppm';
+      case 'turbidity': return 'NTU';
+      case 'chlorine': return 'mg/L';
+      default:
+        if (name.includes('temperature')) return '°C';
+        if (name.includes('humidity')) return '%';
+        if (name.includes('water') && name.includes('level')) return '%';
+        if (name.includes('water') && name.includes('quality')) return 'pH';
+        if (name.includes('pressure')) return 'hPa';
+        if (name.includes('air') && name.includes('quality')) return 'AQI';
+        if (name.includes('ph')) return 'pH';
+        return '';
+    }
 }
 
 // Generate and write mock data for all sensors
 async function generateMockData() {
     try {
-        // Get all sensors
+        // Get all sensors with their types
         const [sensors] = await db.query(
-            'SELECT devEUI, name FROM sensors ORDER BY id DESC'
+            'SELECT devEUI, name, type FROM sensors ORDER BY id DESC'
         );
         
         if (sensors.length === 0) {
@@ -157,9 +199,9 @@ async function generateMockData() {
         console.log(`🎲 Generating mock data for ${sensors.length} sensors...`);
         
         for (const sensor of sensors) {
-            const value = getRandomValue(sensor.name);
-            const unit = getUnit(sensor.name);
-            const fieldName = unit ? sensor.name : 'value';
+            const value = getRandomValueForType(sensor.type, sensor.name);
+            const unit = getUnitForType(sensor.type, sensor.name);
+            const fieldName = unit ? `${sensor.name} (${unit})` : sensor.name;
             
             // Write to InfluxDB
             await writeToInfluxDB(
@@ -168,7 +210,7 @@ async function generateMockData() {
                 { _field: fieldName, _value: value.toString() }
             );
             
-            console.log(`   ✓ ${sensor.name}: ${value} ${unit}`);
+            console.log(`   ✓ ${sensor.name} (${sensor.type}): ${value} ${unit}`);
         }
         
         console.log('✅ Mock data generated successfully');
@@ -349,6 +391,24 @@ async function getActiveSensors() {
   const rows = await queryInfluxDB(query);
   const unique = new Set(rows.map(r => r.devEUI));
   return Array.from(unique);
+}
+
+// Determine sensor type from name
+function determineSensorType(name) {
+    const lowerName = name.toLowerCase();
+    if (lowerName.includes('temperature')) return 'temperature';
+    if (lowerName.includes('humidity')) return 'humidity';
+    if (lowerName.includes('pressure')) return 'pressure';
+    if (lowerName.includes('water') && lowerName.includes('level')) return 'water_level';
+    if (lowerName.includes('water') && lowerName.includes('quality')) return 'water_quality';
+    if (lowerName.includes('water')) return 'water';
+    if (lowerName.includes('ph')) return 'ph';
+    if (lowerName.includes('air') && lowerName.includes('quality')) return 'air_quality';
+    if (lowerName.includes('air')) return 'air';
+    if (lowerName.includes('gas')) return 'gas';
+    if (lowerName.includes('turbidity')) return 'turbidity';
+    if (lowerName.includes('chlorine')) return 'chlorine';
+    return 'general';
 }
 
 // ==================== API ROUTES ====================
@@ -589,7 +649,7 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 
     // Get mapped sensors
     const [sensors] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
        FROM sensors s
        JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE vs.villager_id = ?`,
@@ -625,6 +685,7 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
       result.push({
         devEUI: sensor.devEUI,
         name: sensor.name,
+        type: sensor.type,
         village: sensor.village,
         panchayat: sensor.panchayat,
         district: sensor.district,
@@ -656,7 +717,7 @@ app.get('/api/sensors', async (req, res) => {
   try {
     // Get sensor metadata from MySQL
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, village, panchayat, district, state
+      `SELECT id, devEUI, name, type, village, panchayat, district, state
        FROM sensors
        ORDER BY id DESC`
     );
@@ -665,7 +726,7 @@ app.get('/api/sensors', async (req, res) => {
 
     // For each sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat, district, state } = sensor;
+      const { devEUI, name, type, village, panchayat, district, state } = sensor;
 
       const dataQuery = `
         from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -694,6 +755,7 @@ app.get('/api/sensors', async (req, res) => {
       sensors.push({
         devEUI,
         name,
+        type,
         village,
         panchayat,
         district,
@@ -717,7 +779,7 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
     const { devEUI } = req.params;
 
     const [rows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state,
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state,
               v.phone, v.name AS villager_name, v.aadhaar
        FROM sensors s
        LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
@@ -748,7 +810,7 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
 
 // Add new sensor
 app.post('/api/sensors', async (req, res) => {
-  const { devEUI, deviceName, village, panchayat, district, state, phone } = req.body;
+  const { devEUI, deviceName, type, village, panchayat, district, state, phone } = req.body;
 
   if (!devEUI || !deviceName) {
     return res.status(400).json({
@@ -757,15 +819,18 @@ app.post('/api/sensors', async (req, res) => {
     });
   }
 
+  // Auto-determine type if not provided
+  let sensorType = type || determineSensorType(deviceName);
+
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // Insert sensor with district and state
+    // Insert sensor with type, district and state
     const [sensorResult] = await conn.query(
-      `INSERT INTO sensors (devEUI, name, village, panchayat, district, state)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [devEUI, deviceName, village || null, panchayat || null, district || null, state || null]
+      `INSERT INTO sensors (devEUI, name, type, village, panchayat, district, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [devEUI, deviceName, sensorType, village || null, panchayat || null, district || null, state || null]
     );
 
     const sensorId = sensorResult.insertId;
@@ -794,7 +859,12 @@ app.post('/api/sensors', async (req, res) => {
       success: true,
       message: phone
         ? 'Sensor registered and mapped to villager'
-        : 'Sensor registered successfully'
+        : 'Sensor registered successfully',
+      sensor: {
+        devEUI,
+        name: deviceName,
+        type: sensorType
+      }
     });
   } catch (err) {
     await conn.rollback();
@@ -818,7 +888,7 @@ app.post('/api/sensors', async (req, res) => {
 // Update sensor
 app.put('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
-  const { deviceName, village, panchayat, district, state, phone } = req.body;
+  const { deviceName, type, village, panchayat, district, state, phone } = req.body;
 
   const conn = await db.getConnection();
   try {
@@ -827,9 +897,9 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
     // Update sensor metadata
     const [result] = await conn.query(
       `UPDATE sensors
-       SET name = ?, village = ?, panchayat = ?, district = ?, state = ?
+       SET name = ?, type = ?, village = ?, panchayat = ?, district = ?, state = ?
        WHERE devEUI = ?`,
-      [deviceName, village || null, panchayat || null, district || null, state || null, devEUI]
+      [deviceName, type || 'general', village || null, panchayat || null, district || null, state || null, devEUI]
     );
 
     if (result.affectedRows === 0) {
@@ -945,7 +1015,7 @@ app.get('/api/sensors/by-district', async (req, res) => {
 
     // Get sensors from MySQL by district
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, village, panchayat, district, state
+      `SELECT id, devEUI, name, type, village, panchayat, district, state
        FROM sensors 
        WHERE district = ? 
        ORDER BY name ASC`,
@@ -958,7 +1028,7 @@ app.get('/api/sensors/by-district', async (req, res) => {
 
     // For each sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat, district: sensorDistrict, state } = sensor;
+      const { devEUI, name, type, village, panchayat, district: sensorDistrict, state } = sensor;
 
       const dataQuery = `
         from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -995,6 +1065,7 @@ app.get('/api/sensors/by-district', async (req, res) => {
       sensors.push({
         devEUI,
         name,
+        type,
         village: village || 'Unknown',
         panchayat: panchayat || 'Unknown',
         district: sensorDistrict,
@@ -1078,7 +1149,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
 
     // Get only sensors mapped to this villager
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
        FROM sensors s
        JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE vs.villager_id = ?
@@ -1090,7 +1161,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
 
     // For each sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat, district, state } = sensor;
+      const { devEUI, name, type, village, panchayat, district, state } = sensor;
 
       const dataQuery = `
         from(bucket: "${INFLUX_CONFIG.bucket}")
@@ -1119,6 +1190,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
       sensors.push({
         devEUI,
         name,
+        type,
         village,
         panchayat,
         district,
@@ -1180,7 +1252,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
     // Get recent sensors with status
     const [sensorRows] = await db.query(
-      `SELECT devEUI, name, village, panchayat, district, state 
+      `SELECT devEUI, name, type, village, panchayat, district, state 
        FROM sensors 
        ORDER BY installed_at DESC 
        LIMIT 5`
@@ -1208,6 +1280,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
       recentSensors.push({
         devEUI: sensor.devEUI,
         name: sensor.name,
+        type: sensor.type,
         village: sensor.village,
         panchayat: sensor.panchayat,
         district: sensor.district,
@@ -1695,7 +1768,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
 
     // Get sensors in this village that are NOT mapped to any villager
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.village, s.panchayat, s.district, s.state
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
        FROM sensors s
        LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE s.village = ? AND vs.id IS NULL
@@ -1709,7 +1782,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
 
     // For each unassigned sensor, get latest measurement from InfluxDB
     for (const sensor of sensorRows) {
-      const { devEUI, name, village, panchayat, district, state } = sensor;
+      const { devEUI, name, type, village, panchayat, district, state } = sensor;
 
       try {
         const dataQuery = `
@@ -1739,6 +1812,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
         sensors.push({
           devEUI,
           name,
+          type,
           village,
           panchayat,
           district,
@@ -1753,6 +1827,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
         sensors.push({
           devEUI,
           name,
+          type,
           village,
           panchayat,
           district,
@@ -1881,7 +1956,7 @@ app.get('/api/debug/villages', async (req, res) => {
 
     // Get all unassigned sensors (for quick check)
     const [unassignedSensors] = await db.query(
-      `SELECT s.devEUI, s.name, s.village
+      `SELECT s.devEUI, s.name, s.type, s.village
        FROM sensors s
        LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
        WHERE vs.id IS NULL
@@ -1997,10 +2072,10 @@ app.listen(PORT, () => {
   console.log('   GET  /api/sensors');
   console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
   console.log('   GET  /api/admin/dashboard');
-  console.log('   GET  /api/admin/mock-status (NEW)');
-  console.log('   POST /api/admin/mock-enable (NEW)');
-  console.log('   POST /api/admin/mock-disable (NEW)');
-  console.log('   POST /api/admin/mock-generate (NEW)');
+  console.log('   GET  /api/admin/mock-status');
+  console.log('   POST /api/admin/mock-enable');
+  console.log('   POST /api/admin/mock-disable');
+  console.log('   POST /api/admin/mock-generate');
   console.log('   GET  /api/sensors/by-district?district=Kasaragod');
   console.log('   GET  /api/districts');
   console.log('   POST /api/verify/check-phone');
@@ -2013,4 +2088,5 @@ app.listen(PORT, () => {
   console.log('══════════════════════════════════════════════════════');
   console.log('🎲 Mock Data Generator: Disabled by default');
   console.log('   Enable via Admin Dashboard or POST /api/admin/mock-enable');
+  console.log('📊 Sensor types: temperature, humidity, pressure, water_level, etc.');
 });
