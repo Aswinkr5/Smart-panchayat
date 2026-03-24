@@ -188,8 +188,7 @@ async function generateMockData() {
       // Write to InfluxDB with the formatted measurement string
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
-        .stringField('measurement', measurementString)  // This is what the web dashboard reads
-        .floatField(fieldName, parseFloat(value));      // This is for numerical operations
+        .stringField('measurement', measurementString);
       
       writeApi.writePoint(point);
       await writeApi.flush();
@@ -267,6 +266,7 @@ async function getMockDataStatus() {
 setTimeout(() => {
     startMockDataGenerator();
 }, 5000);
+
 // ==================== MIDDLEWARE ====================
 
 app.use(cors({
@@ -304,51 +304,7 @@ app.use((req, res, next) => {
 async function queryInfluxDB(fluxQuery) {
   try {
     const result = await queryApi.collectRows(fluxQuery);
-    
-    // Transform the result to ensure proper formatting for frontend
-    const transformedResult = result.map(row => {
-      // If the row already has a 'measurement' field from InfluxDB
-      if (row.measurement) {
-        // Parse the measurement string to extract field and value
-        const measurementStr = row.measurement;
-        if (measurementStr.includes(':')) {
-          const [field, valuePart] = measurementStr.split(':');
-          return {
-            ...row,
-            _field: field.trim(),
-            _value: valuePart.trim()
-          };
-        }
-        return {
-          ...row,
-          _field: 'value',
-          _value: row.measurement
-        };
-      }
-      
-      // If row has _field and _value directly
-      if (row._field && row._value !== undefined) {
-        return row;
-      }
-      
-      // Fallback: try to find any field that might contain data
-      const possibleFields = Object.keys(row).filter(key => 
-        key !== '_time' && key !== '_measurement' && key !== 'devEUI' && key !== 'result'
-      );
-      
-      if (possibleFields.length > 0) {
-        const field = possibleFields[0];
-        return {
-          ...row,
-          _field: field,
-          _value: row[field]
-        };
-      }
-      
-      return row;
-    });
-    
-    return transformedResult;
+    return result || [];
   } catch (error) {
     console.error('❌ InfluxDB query error:', error.message);
     return [];
@@ -692,8 +648,7 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
           |> range(start: -1h)
           |> filter(fn: (r) => r._measurement == "sensor_data")
           |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
+          |> last()
       `;
 
       const data = await queryInfluxDB(flux);
@@ -703,7 +658,12 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
       let status = 'Offline';
 
       if (data.length > 0) {
-        measurement = `${data[0]._field}: ${data[0]._value}`;
+        // Use the measurement field if available
+        if (data[0].measurement) {
+          measurement = data[0].measurement;
+        } else {
+          measurement = `${data[0]._field}: ${data[0]._value}`;
+        }
         const t = new Date(data[0]._time);
         time = t.toLocaleString();
         status = (Date.now() - t.getTime()) / 1000 <= 22 ? 'Live' : 'Offline';
@@ -760,8 +720,7 @@ app.get('/api/sensors', async (req, res) => {
           |> range(start: -1h)
           |> filter(fn: (r) => r._measurement == "sensor_data")
           |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
+          |> last()
       `;
 
       const data = await queryInfluxDB(dataQuery);
@@ -771,7 +730,12 @@ app.get('/api/sensors', async (req, res) => {
       let status = 'Offline';
 
       if (data.length > 0) {
-        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        // Use the measurement field if available (from mock data)
+        if (data[0].measurement) {
+          latestValue = data[0].measurement;
+        } else {
+          latestValue = `${data[0]._field}: ${data[0]._value}`;
+        }
         const t = new Date(data[0]._time);
         latestTime = t.toLocaleString();
         const now = new Date();
@@ -1062,8 +1026,7 @@ app.get('/api/sensors/by-district', async (req, res) => {
           |> range(start: -1h)
           |> filter(fn: (r) => r._measurement == "sensor_data")
           |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
+          |> last()
       `;
 
       const data = await queryInfluxDB(dataQuery);
@@ -1081,7 +1044,11 @@ app.get('/api/sensors/by-district', async (req, res) => {
       isAssigned = assignment !== null;
 
       if (data.length > 0) {
-        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        if (data[0].measurement) {
+          latestValue = data[0].measurement;
+        } else {
+          latestValue = `${data[0]._field}: ${data[0]._value}`;
+        }
         const t = new Date(data[0]._time);
         latestTime = t.toLocaleString();
         const now = new Date();
@@ -1195,8 +1162,7 @@ app.get('/api/mobile/sensors', async (req, res) => {
           |> range(start: -1h)
           |> filter(fn: (r) => r._measurement == "sensor_data")
           |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
+          |> last()
       `;
 
       const data = await queryInfluxDB(dataQuery);
@@ -1206,7 +1172,11 @@ app.get('/api/mobile/sensors', async (req, res) => {
       let status = 'Offline';
 
       if (data.length > 0) {
-        latestValue = `${data[0]._field}: ${data[0]._value}`;
+        if (data[0].measurement) {
+          latestValue = data[0].measurement;
+        } else {
+          latestValue = `${data[0]._field}: ${data[0]._value}`;
+        }
         const t = new Date(data[0]._time);
         latestTime = t.toLocaleString();
         const now = new Date();
@@ -1292,8 +1262,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
           |> range(start: -1h)
           |> filter(fn: (r) => r._measurement == "sensor_data")
           |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
+          |> last()
       `;
 
       const data = await queryInfluxDB(flux);
@@ -1727,6 +1696,46 @@ app.get('/api/debug/raw', async (req, res) => {
   }
 });
 
+// Debug latest sensor data
+app.get('/api/debug/latest-sensor-data', async (req, res) => {
+  try {
+    const [sensors] = await db.query('SELECT devEUI, name FROM sensors');
+    
+    const results = [];
+    
+    for (const sensor of sensors) {
+      const fluxQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -5m)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+          |> last()
+      `;
+      
+      const data = await queryInfluxDB(fluxQuery);
+      
+      results.push({
+        devEUI: sensor.devEUI,
+        name: sensor.name,
+        hasData: data.length > 0,
+        latestData: data.length > 0 ? {
+          time: data[0]._time,
+          measurement: data[0].measurement,
+          field: data[0]._field,
+          value: data[0]._value
+        } : null
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: results
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Debug MySQL tables
 app.get('/api/debug/mysql-tables', async (req, res) => {
   try {
@@ -1817,8 +1826,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
             |> range(start: -1h)
             |> filter(fn: (r) => r._measurement == "sensor_data")
             |> filter(fn: (r) => r.devEUI == "${devEUI}")
-            |> sort(columns: ["_time"], desc: true)
-            |> limit(n: 1)
+            |> last()
         `;
 
         const data = await queryInfluxDB(dataQuery);
@@ -1828,7 +1836,11 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
         let status = 'Offline';
 
         if (data.length > 0) {
-          latestValue = `${data[0]._field}: ${data[0]._value}`;
+          if (data[0].measurement) {
+            latestValue = data[0].measurement;
+          } else {
+            latestValue = `${data[0]._field}: ${data[0]._value}`;
+          }
           const t = new Date(data[0]._time);
           latestTime = t.toLocaleString();
           const now = new Date();
@@ -2105,6 +2117,7 @@ app.listen(PORT, () => {
   console.log('   POST /api/admin/mock-generate');
   console.log('   GET  /api/sensors/by-district?district=Kasaragod');
   console.log('   GET  /api/districts');
+  console.log('   GET  /api/debug/latest-sensor-data (NEW)');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
