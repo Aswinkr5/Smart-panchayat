@@ -1,10 +1,3 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { InfluxDB, Point } = require('@influxdata/influxdb-client');
-const path = require('path');
-const app = express();
-
 // ==================== DATABASE CONFIGURATIONS ====================
 
 // InfluxDB Configuration
@@ -22,18 +15,43 @@ const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.tok
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// MySQL Configuration - Use promise wrapper
+// MySQL Configuration - Updated for Railway compatibility
 const mysql = require('mysql2');
-const db = mysql.createPool({
-  host: process.env.MYSQL_HOST,
-  user: process.env.MYSQL_USER,
-  password: process.env.MYSQL_PASSWORD,
-  database: process.env.MYSQL_DATABASE,
-  port: process.env.MYSQL_PORT,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-}).promise(); // ADD .promise() HERE
+
+// Check if MYSQL_URL is provided (Railway style)
+let dbConfig;
+if (process.env.MYSQL_URL) {
+  // Railway provides a full MySQL URL
+  console.log('📦 Connecting to MySQL via Railway URL');
+  dbConfig = process.env.MYSQL_URL;
+} else {
+  // Fallback to individual environment variables
+  console.log('📦 Connecting to MySQL via individual variables');
+  dbConfig = {
+    host: process.env.MYSQL_HOST || 'localhost',
+    user: process.env.MYSQL_USER || 'root',
+    password: process.env.MYSQL_PASSWORD || '',
+    database: process.env.MYSQL_DATABASE || 'smart_panchayat',
+    port: process.env.MYSQL_PORT || 3306,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  };
+}
+
+// Create connection pool
+const db = mysql.createPool(dbConfig).promise();
+
+// Test MySQL connection immediately
+(async () => {
+  try {
+    await db.query('SELECT 1');
+    console.log('✅ MySQL database connected successfully');
+  } catch (error) {
+    console.error('❌ MySQL connection failed:', error.message);
+    console.error('   Please check your MYSQL_URL or individual MySQL environment variables');
+  }
+})();
 
 // ==================== OTP STORE ====================
 const otpStore = new Map();
