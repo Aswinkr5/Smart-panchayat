@@ -1534,6 +1534,137 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
   }
 });
 
+// Get district statistics (average values for unmapped sensors only)
+app.get('/api/district-stats/:district', async (req, res) => {
+  try {
+    const { district } = req.params;
+    
+    console.log(`📍 Fetching statistics for district: ${district}`);
+    
+    // Get all sensors in the district that are NOT mapped to any villager
+    const [sensorRows] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE s.district = ? AND vs.id IS NULL
+       ORDER BY s.type ASC`,
+      [district]
+    );
+    
+    console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
+    
+    // Group sensors by type
+    const sensorsByType = {
+      temperature: [],
+      humidity: [],
+      water_quality: [],
+      air_quality: []
+    };
+    
+    for (const sensor of sensorRows) {
+      const sensorType = sensor.type;
+      if (sensorsByType[sensorType]) {
+        sensorsByType[sensorType].push(sensor);
+      }
+    }
+    
+    // Fetch latest values from InfluxDB and calculate averages
+    const stats = {};
+    
+    for (const [type, sensors] of Object.entries(sensorsByType)) {
+      if (sensors.length === 0) continue;
+      
+      let total = 0;
+      let validCount = 0;
+      const sensorValues = [];
+      
+      for (const sensor of sensors) {
+        const dataQuery = `
+          from(bucket: "${INFLUX_CONFIG.bucket}")
+            |> range(start: -5m)
+            |> filter(fn: (r) => r._measurement == "sensor_data")
+            |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+            |> last()
+        `;
+        
+        const data = await queryInfluxDB(dataQuery);
+        
+        if (data.length > 0) {
+          let value = null;
+          
+          // Extract numeric value
+          if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
+            value = data[0][type];
+          } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
+            value = data[0]._value;
+          } else if (data[0].value !== undefined && typeof data[0].value === 'number') {
+            value = data[0].value;
+          }
+          
+          if (value !== null && value > 0) {
+            total += value;
+            validCount++;
+            sensorValues.push({
+              name: sensor.name,
+              village: sensor.village,
+              value: value
+            });
+          }
+        }
+      }
+      
+      if (validCount > 0) {
+        const average = total / validCount;
+        stats[type] = {
+          count: validCount,
+          totalSensors: sensors.length,
+          average: average,
+          unit: _getUnitForType(type),
+          sensors: sensorValues,
+          lastUpdated: new Date().toISOString()
+        };
+      } else {
+        stats[type] = {
+          count: 0,
+          totalSensors: sensors.length,
+          average: null,
+          unit: _getUnitForType(type),
+          sensors: [],
+          lastUpdated: null
+        };
+      }
+    }
+    
+    console.log(`✅ Calculated stats for ${district}:`, Object.keys(stats));
+    
+    res.json({
+      success: true,
+      district: district,
+      stats: stats,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('❌ Error fetching district statistics:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// Helper function to get unit based on sensor type
+function _getUnitForType(type) {
+  switch(type) {
+    case 'temperature': return '°C';
+    case 'humidity': return '%';
+    case 'water_quality': return 'pH';
+    case 'air_quality': return 'AQI';
+    default: return '';
+  }
+}
+
+
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
