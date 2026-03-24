@@ -153,6 +153,7 @@ function getUnitForType(type, sensorName) {
 }
 
 // Generate and write mock data for all sensors
+// Generate and write mock data for all sensors
 async function generateMockData() {
   try {
     const [sensors] = await db.query(
@@ -177,7 +178,7 @@ async function generateMockData() {
       if (fieldName === 'water_quality') fieldName = 'water_quality';
       if (fieldName === 'air_quality') fieldName = 'air_quality';
       
-      // Write to InfluxDB - store numeric value, not string
+      // Write to InfluxDB - store numeric value
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
         .floatField(fieldName, value);
@@ -197,6 +198,33 @@ async function generateMockData() {
     console.error('❌ Mock data generation error:', error);
   }
 }
+
+// Debug endpoint to check raw data for a sensor
+app.get('/api/debug/raw-sensor-data/:devEUI', async (req, res) => {
+  try {
+    const { devEUI } = req.params;
+    
+    const fluxQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -1h)
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r.devEUI == "${devEUI}")
+        |> sort(columns: ["_time"], desc: true)
+        |> limit(n: 20)
+    `;
+    
+    const rows = await queryInfluxDB(fluxQuery);
+    
+    res.json({
+      success: true,
+      devEUI: devEUI,
+      count: rows.length,
+      data: rows
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 // Generate historical data for past 24 hours
 async function generateHistoricalData() {
@@ -1409,60 +1437,41 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     const { range } = req.query;
     let rangeValue = range ? range : '-24h';
 
-    // For better performance and cleaner graph, limit the number of points
-    let fluxQuery;
-    if (rangeValue === '-24h') {
-      // For 24 hours, show points every hour
-      fluxQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: ${rangeValue})
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> aggregateWindow(every: 1h, fn: mean)
-          |> sort(columns: ["_time"], desc: false)
-      `;
-    } else if (rangeValue === '-7d') {
-      // For 7 days, show points every 6 hours
-      fluxQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: ${rangeValue})
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> aggregateWindow(every: 6h, fn: mean)
-          |> sort(columns: ["_time"], desc: false)
-      `;
-    } else {
-      // For longer ranges, show points every day
-      fluxQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: ${rangeValue})
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> aggregateWindow(every: 1d, fn: mean)
-          |> sort(columns: ["_time"], desc: false)
-      `;
-    }
-
-    const rows = await queryInfluxDB(fluxQuery);
-    
-    // Get the sensor type
+    // First, get the sensor type
     const [sensorInfo] = await db.query(
       'SELECT type FROM sensors WHERE devEUI = ?',
       [devEUI]
     );
     const sensorType = sensorInfo.length > 0 ? sensorInfo[0].type : 'temperature';
     
-    // Transform to the format the frontend expects
+    console.log(`📊 Fetching history for sensor ${devEUI}, type: ${sensorType}, range: ${rangeValue}`);
+
+    // Query to get all data points in the time range
+    const fluxQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: ${rangeValue})
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r.devEUI == "${devEUI}")
+        |> filter(fn: (r) => exists r.${sensorType})
+        |> sort(columns: ["_time"], desc: false)
+    `;
+
+    const rows = await queryInfluxDB(fluxQuery);
+    
+    console.log(`📊 Found ${rows.length} raw data points for sensor ${devEUI}`);
+
+    // Transform to the format the frontend expects with numeric values
     const history = rows.map(row => {
       let value = 0;
-      // Try to get the value from the field that matches sensor type
-      if (row[sensorType] !== undefined && typeof row[sensorType] === 'number') {
-        value = row[sensorType];
+      
+      // Get the value from the sensor type field
+      if (row[sensorType] !== undefined && row[sensorType] !== null) {
+        value = parseFloat(row[sensorType]) || 0;
       } else {
         // Fallback: look for any numeric field
         const numericFields = Object.keys(row).filter(key => 
           key !== '_time' && key !== '_measurement' && key !== 'devEUI' && 
-          typeof row[key] === 'number'
+          typeof row[key] === 'number' && row[key] !== null
         );
         if (numericFields.length > 0) {
           value = row[numericFields[0]];
@@ -1476,12 +1485,36 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       };
     }).filter(h => h.value > 0); // Only include points with valid values
 
-    console.log(`✅ Found ${history.length} aggregated data points for sensor ${devEUI}`);
+    // If we have too many points, aggregate them for better performance
+    let aggregatedHistory = history;
+    if (history.length > 100) {
+      // Group by hour for 24h range
+      const groupedByHour = {};
+      history.forEach(point => {
+        const hour = new Date(point.time).getHours();
+        const key = new Date(point.time).toISOString().slice(0, 13);
+        if (!groupedByHour[key]) {
+          groupedByHour[key] = { sum: 0, count: 0, time: point.time };
+        }
+        groupedByHour[key].sum += point.value;
+        groupedByHour[key].count++;
+      });
+      
+      aggregatedHistory = Object.values(groupedByHour).map(group => ({
+        time: group.time,
+        value: group.sum / group.count,
+        field: sensorType
+      }));
+      
+      console.log(`📊 Aggregated ${history.length} points to ${aggregatedHistory.length} points`);
+    }
+
+    console.log(`✅ Returning ${aggregatedHistory.length} data points for sensor ${devEUI}`);
 
     res.json({
       success: true,
-      history: history,
-      count: history.length
+      history: aggregatedHistory,
+      count: aggregatedHistory.length
     });
 
   } catch (err) {
