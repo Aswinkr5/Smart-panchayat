@@ -161,6 +161,7 @@ function getUnitForType(type, sensorName) {
 }
 
 // Generate and write mock data for all sensors - FIXED
+// Generate and write mock data for all sensors
 async function generateMockData() {
   try {
     const [sensors] = await db.query(
@@ -179,15 +180,19 @@ async function generateMockData() {
       const value = getRandomValueForType(sensor.type, sensor.name);
       const unit = getUnitForType(sensor.type, sensor.name);
       
-      // Create a clean field name based on sensor type
+      // Create the field name based on sensor type
       let fieldName = sensor.type;
+      if (fieldName === 'water_level') fieldName = 'water_level';
+      if (fieldName === 'water_quality') fieldName = 'water_quality';
+      if (fieldName === 'air_quality') fieldName = 'air_quality';
       
-      // Format the measurement string as "field: value unit"
-      const measurementString = unit ? `${fieldName}: ${value} ${unit}` : `${fieldName}: ${value}`;
+      // Create the formatted measurement string for the frontend
+      const measurementString = `${fieldName}: ${value} ${unit}`.trim();
       
-      // Write to InfluxDB with the formatted measurement string
+      // Write to InfluxDB - store both the numeric value and the formatted string
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
+        .floatField(fieldName, parseFloat(value))
         .stringField('measurement', measurementString);
       
       writeApi.writePoint(point);
@@ -269,18 +274,23 @@ setTimeout(() => {
 
 // ==================== MIDDLEWARE ====================
 
+// ==================== MIDDLEWARE ====================
+
+// Updated CORS configuration
 app.use(cors({
   origin: '*',
-  credentials: false,
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With']
 }));
 
+// Also add these headers explicitly
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
