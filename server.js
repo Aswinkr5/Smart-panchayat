@@ -152,6 +152,7 @@ function getUnitForType(type, sensorName) {
   }
 }
 
+// Generate and write mock data for all sensors
 async function generateMockData() {
   try {
     const [sensors] = await db.query(
@@ -167,25 +168,24 @@ async function generateMockData() {
     let generatedCount = 0;
     
     for (const sensor of sensors) {
-      const value = getRandomValueForType(sensor.type, sensor.name);
+      const value = parseFloat(getRandomValueForType(sensor.type, sensor.name));
       const unit = getUnitForType(sensor.type, sensor.name);
       
+      // Create the field name based on sensor type
       let fieldName = sensor.type;
       if (fieldName === 'water_level') fieldName = 'water_level';
       if (fieldName === 'water_quality') fieldName = 'water_quality';
       if (fieldName === 'air_quality') fieldName = 'air_quality';
       
-      const measurementString = `${fieldName}: ${value} ${unit}`.trim();
-      
+      // Write to InfluxDB - store numeric value, not string
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
-        .floatField(fieldName, parseFloat(value))
-        .stringField('measurement', measurementString);
+        .floatField(fieldName, value);
       
       writeApi.writePoint(point);
       await writeApi.flush();
       
-      console.log(`   ✓ ${sensor.name} (${sensor.type}): ${measurementString}`);
+      console.log(`   ✓ ${sensor.name} (${sensor.type}): ${value} ${unit}`);
       generatedCount++;
     }
     
@@ -1401,42 +1401,62 @@ app.get('/api/debug/villages', async (req, res) => {
   }
 });
 
+// Get sensor history for graphing
 app.get('/api/sensors/:devEUI/history', async (req, res) => {
   try {
     const { devEUI } = req.params;
     const { range } = req.query;
     let rangeValue = range ? range : '-24h';
 
-    let fluxQuery;
-    if (rangeValue === '-24h' || rangeValue === '-1h') {
-      fluxQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: ${rangeValue})
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> sort(columns: ["_time"], desc: false)
-      `;
-    } else {
-      fluxQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: ${rangeValue})
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> aggregateWindow(every: 1h, fn: mean)
-          |> sort(columns: ["_time"], desc: false)
-      `;
-    }
+    const fluxQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: ${rangeValue})
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r.devEUI == "${devEUI}")
+        |> sort(columns: ["_time"], desc: false)
+    `;
 
     const rows = await queryInfluxDB(fluxQuery);
-    const history = rows.map(row => ({ time: row._time, value: row._value, field: row._field }));
+    
+    // Get the sensor type to know which field to extract
+    const [sensorInfo] = await db.query(
+      'SELECT type FROM sensors WHERE devEUI = ?',
+      [devEUI]
+    );
+    const sensorType = sensorInfo.length > 0 ? sensorInfo[0].type : 'temperature';
+    
+    // Transform to the format the frontend expects with numeric values
+    const history = rows.map(row => {
+      let value = 0;
+      // Try to get the value from the field that matches sensor type
+      if (row[sensorType] !== undefined) {
+        value = parseFloat(row[sensorType]) || 0;
+      } else {
+        // Fallback: look for any numeric field
+        const numericFields = Object.keys(row).filter(key => 
+          key !== '_time' && key !== '_measurement' && key !== 'devEUI' && 
+          typeof row[key] === 'number'
+        );
+        if (numericFields.length > 0) {
+          value = row[numericFields[0]] || 0;
+        }
+      }
+      
+      return {
+        time: row._time,
+        value: value,
+        field: sensorType
+      };
+    }).filter(h => h.value > 0); // Only include points with valid values
 
-    console.log(`✅ Found ${history.length} historical data points for sensor ${devEUI} with range ${rangeValue}`);
+    console.log(`✅ Found ${history.length} historical data points for sensor ${devEUI}`);
 
     res.json({
       success: true,
       history: history,
       count: history.length
     });
+
   } catch (err) {
     console.error('❌ Error fetching sensor history:', err);
     res.status(500).json({
