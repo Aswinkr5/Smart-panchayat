@@ -676,69 +676,93 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 app.get('/api/sensors/by-district', async (req, res) => {
   try {
     const { district } = req.query;
-    if (!district) return res.status(400).json({ success: false, error: 'District name is required' });
+    console.log('📍 Fetching sensors for district:', district);
 
+    if (!district) {
+      return res.status(400).json({
+        success: false,
+        error: 'District name is required'
+      });
+    }
+
+    // Get sensors from MySQL by district
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-       FROM sensors s
-       WHERE s.district = ? 
-       ORDER BY s.name ASC`,
+      `SELECT id, devEUI, name, type, village, panchayat, district, state
+       FROM sensors 
+       WHERE district = ? 
+       ORDER BY name ASC`,
       [district]
     );
+
+    console.log(`📊 Found ${sensorRows.length} sensors in ${district} district`);
 
     const sensors = [];
 
     for (const sensor of sensorRows) {
-      // Check if sensor has a phone number (assigned)
-      const [[assignment]] = await db.query(
-        `SELECT phone FROM villager_sensors WHERE sensor_id = ?`,
-        [sensor.id]
-      );
-      
-      // Sensor is assigned only if there's a phone number
-      const isAssigned = assignment !== null && assignment.phone !== null && assignment.phone !== '';
-      
-      console.log(`Sensor ${sensor.devEUI}: phone = ${assignment?.phone || 'NULL'}, isAssigned = ${isAssigned}`);
+      const { id, devEUI, name, type, village, panchayat, district: sensorDistrict, state } = sensor;
 
-      // Get latest reading
-      const dataQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-          |> last()
-      `;
+      // Check if sensor is already assigned to any villager (has phone number)
+      let isAssigned = false;
+      try {
+        const [assignmentRows] = await db.query(
+          `SELECT phone FROM villager_sensors WHERE sensor_id = ?`,
+          [id]
+        );
+        // Check if there's a row AND phone exists AND phone is not empty
+        if (assignmentRows && assignmentRows.length > 0) {
+          const phone = assignmentRows[0].phone;
+          isAssigned = phone !== null && phone !== undefined && phone !== '';
+        }
+        console.log(`Sensor ${devEUI}: isAssigned = ${isAssigned}`);
+      } catch (err) {
+        console.log(`Error checking assignment for sensor ${devEUI}:`, err.message);
+        isAssigned = false;
+      }
 
-      const data = await queryInfluxDB(dataQuery);
-
+      // Get latest reading from InfluxDB
       let latestValue = 'No data';
       let latestTime = '';
       let status = 'Offline';
+      
+      try {
+        const dataQuery = `
+          from(bucket: "${INFLUX_CONFIG.bucket}")
+            |> range(start: -5m)
+            |> filter(fn: (r) => r._measurement == "sensor_data")
+            |> filter(fn: (r) => r.devEUI == "${devEUI}")
+            |> last()
+        `;
 
-      if (data.length > 0) {
-        if (data[0][sensor.type] !== undefined) {
-          latestValue = `${sensor.type}: ${data[0][sensor.type]}`;
-        } else if (data[0].measurement) {
-          latestValue = data[0].measurement;
-        } else if (data[0]._field && data[0]._value) {
-          latestValue = `${data[0]._field}: ${data[0]._value}`;
+        const data = await queryInfluxDB(dataQuery);
+
+        if (data && data.length > 0) {
+          // Try to get measurement from the field
+          if (data[0][type] !== undefined) {
+            latestValue = `${type}: ${data[0][type]}`;
+          } else if (data[0].measurement) {
+            latestValue = data[0].measurement;
+          } else if (data[0]._field && data[0]._value) {
+            latestValue = `${data[0]._field}: ${data[0]._value}`;
+          }
+          
+          const t = new Date(data[0]._time);
+          latestTime = t.toLocaleString();
+          const now = new Date();
+          const diffSeconds = (now - t) / 1000;
+          status = diffSeconds <= 22 ? 'Live' : 'Offline';
         }
-        
-        const t = new Date(data[0]._time);
-        latestTime = t.toLocaleString();
-        const now = new Date();
-        const diffSeconds = (now - t) / 1000;
-        status = diffSeconds <= 22 ? 'Live' : 'Offline';
+      } catch (err) {
+        console.log(`Error fetching InfluxDB data for sensor ${devEUI}:`, err.message);
       }
 
       sensors.push({
-        devEUI: sensor.devEUI,
-        name: sensor.name,
-        type: sensor.type,
-        village: sensor.village || 'Unknown',
-        panchayat: sensor.panchayat || 'Unknown',
-        district: sensor.district,
-        state: sensor.state,
+        devEUI,
+        name,
+        type,
+        village: village || 'Unknown',
+        panchayat: panchayat || 'Unknown',
+        district: sensorDistrict,
+        state: state || '',
         measurement: latestValue,
         time: latestTime,
         status,
@@ -746,10 +770,20 @@ app.get('/api/sensors/by-district', async (req, res) => {
       });
     }
 
-    res.json({ success: true, district, sensors, count: sensors.length });
+    res.json({
+      success: true,
+      district: district,
+      sensors: sensors,
+      count: sensors.length
+    });
+
   } catch (err) {
     console.error('❌ Error fetching sensors by district:', err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      stack: err.stack
+    });
   }
 });
 
@@ -760,7 +794,7 @@ app.get('/api/district-stats/:district', async (req, res) => {
     
     console.log(`📍 Fetching statistics for district: ${district}`);
     
-    // Get all sensors in the district that are NOT mapped (no phone number in villager_sensors)
+    // Get all sensors in the district that are NOT mapped (no phone number)
     const [sensorRows] = await db.query(
       `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
        FROM sensors s
@@ -787,7 +821,6 @@ app.get('/api/district-stats/:district', async (req, res) => {
       }
     }
     
-    // Fetch latest values from InfluxDB and calculate averages
     const stats = {};
     
     for (const [type, sensors] of Object.entries(sensorsByType)) {
@@ -798,36 +831,40 @@ app.get('/api/district-stats/:district', async (req, res) => {
       const sensorValues = [];
       
       for (const sensor of sensors) {
-        const dataQuery = `
-          from(bucket: "${INFLUX_CONFIG.bucket}")
-            |> range(start: -5m)
-            |> filter(fn: (r) => r._measurement == "sensor_data")
-            |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-            |> last()
-        `;
-        
-        const data = await queryInfluxDB(dataQuery);
-        
-        if (data.length > 0) {
-          let value = null;
+        try {
+          const dataQuery = `
+            from(bucket: "${INFLUX_CONFIG.bucket}")
+              |> range(start: -5m)
+              |> filter(fn: (r) => r._measurement == "sensor_data")
+              |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+              |> last()
+          `;
           
-          if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
-            value = data[0][type];
-          } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
-            value = data[0]._value;
-          } else if (data[0].value !== undefined && typeof data[0].value === 'number') {
-            value = data[0].value;
-          }
+          const data = await queryInfluxDB(dataQuery);
           
-          if (value !== null && value > 0) {
-            total += value;
-            validCount++;
-            sensorValues.push({
-              name: sensor.name,
-              village: sensor.village,
-              value: value
-            });
+          if (data && data.length > 0) {
+            let value = null;
+            
+            if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
+              value = data[0][type];
+            } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
+              value = data[0]._value;
+            } else if (data[0].value !== undefined && typeof data[0].value === 'number') {
+              value = data[0].value;
+            }
+            
+            if (value !== null && value > 0) {
+              total += value;
+              validCount++;
+              sensorValues.push({
+                name: sensor.name,
+                village: sensor.village,
+                value: value
+              });
+            }
           }
+        } catch (err) {
+          console.log(`Error fetching data for sensor ${sensor.devEUI}:`, err.message);
         }
       }
       
@@ -866,7 +903,8 @@ app.get('/api/district-stats/:district', async (req, res) => {
     console.error('❌ Error fetching district statistics:', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: err.message,
+      stack: err.stack
     });
   }
 });
