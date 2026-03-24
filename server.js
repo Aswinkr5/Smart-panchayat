@@ -172,13 +172,15 @@ async function generateMockData() {
       const value = parseFloat(getRandomValueForType(sensor.type, sensor.name));
       const unit = getUnitForType(sensor.type, sensor.name);
       
-      // Create the field name based on sensor type
+      // Use the sensor type as the field name
       let fieldName = sensor.type;
       if (fieldName === 'water_level') fieldName = 'water_level';
       if (fieldName === 'water_quality') fieldName = 'water_quality';
       if (fieldName === 'air_quality') fieldName = 'air_quality';
       
-      // Write to InfluxDB - store numeric value
+      console.log(`   Writing: ${sensor.name} -> ${fieldName} = ${value} ${unit}`);
+      
+      // Write to InfluxDB - store numeric value directly as the field
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
         .floatField(fieldName, value);
@@ -198,7 +200,6 @@ async function generateMockData() {
     console.error('❌ Mock data generation error:', error);
   }
 }
-
 // Debug endpoint to check raw data for a sensor
 app.get('/api/debug/raw-sensor-data/:devEUI', async (req, res) => {
   try {
@@ -1448,7 +1449,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     
     console.log(`📊 Sensor type: ${sensorType}`);
 
-    // Query to get all data points in the time range
+    // Query to get all data points - FIXED: Don't use exists, just get all fields
     const fluxQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: ${rangeValue})
@@ -1470,6 +1471,12 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       });
     }
 
+    // Log the first row to see what fields are available
+    if (rows.length > 0) {
+      console.log(`📊 First row fields: ${Object.keys(rows[0]).join(', ')}`);
+      console.log(`📊 First row data: ${JSON.stringify(rows[0])}`);
+    }
+
     // Transform to the format the frontend expects with numeric values
     const history = [];
     
@@ -1477,11 +1484,12 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       let value = null;
       let fieldName = null;
       
-      // Look for numeric fields in the row
+      // Look for numeric fields that match the sensor type
+      // Skip metadata fields: _time, _measurement, devEUI, result, table, _start, _stop
+      const skipFields = ['_time', '_measurement', 'devEUI', 'result', 'table', '_start', '_stop', '_field', '_value'];
+      
       for (const [key, val] of Object.entries(row)) {
-        // Skip metadata fields
-        if (key !== '_time' && key !== '_measurement' && key !== 'devEUI' && 
-            key !== 'result' && key !== 'table') {
+        if (!skipFields.includes(key)) {
           // Check if it's a number
           if (typeof val === 'number') {
             value = val;
@@ -1491,11 +1499,26 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
           // Try to parse string as number
           if (typeof val === 'string') {
             const num = parseFloat(val);
-            if (!isNaN(num)) {
+            if (!isNaN(num) && num > 0) {
               value = num;
               fieldName = key;
               break;
             }
+          }
+        }
+      }
+      
+      // Also check if there's a field that matches the sensor type
+      if (value === null && row[sensorType] !== undefined) {
+        const val = row[sensorType];
+        if (typeof val === 'number') {
+          value = val;
+          fieldName = sensorType;
+        } else if (typeof val === 'string') {
+          const num = parseFloat(val);
+          if (!isNaN(num)) {
+            value = num;
+            fieldName = sensorType;
           }
         }
       }
@@ -1511,6 +1534,10 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     }
 
     console.log(`✅ Returning ${history.length} valid data points for sensor ${devEUI}`);
+    
+    if (history.length > 0) {
+      console.log(`📊 First value: ${history[0].value}, Last value: ${history[history.length-1].value}`);
+    }
 
     res.json({
       success: true,
