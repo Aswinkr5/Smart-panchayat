@@ -1,3 +1,10 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { InfluxDB, Point } = require('@influxdata/influxdb-client');
+const path = require('path');
+const app = express();
+
 // ==================== DATABASE CONFIGURATIONS ====================
 
 // InfluxDB Configuration
@@ -15,40 +22,35 @@ const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.tok
 const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// MySQL Configuration - Using Railway MYSQL_URL
+// MySQL Configuration - Fixed for Render/Railway connection
 const mysql = require('mysql2');
 
 console.log('🔧 MySQL Configuration:');
-console.log('   Using MYSQL_URL:', process.env.MYSQL_URL ? '✅ Yes' : '❌ No');
 
 let db;
+// Check if MYSQL_URL is provided (from Railway)
 if (process.env.MYSQL_URL) {
-  // Use Railway's MYSQL_URL
-  console.log('   Connecting via MYSQL_URL');
+  console.log('   Using MYSQL_URL connection');
   db = mysql.createPool({
     uri: process.env.MYSQL_URL,
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0,
-    ssl: {
-      rejectUnauthorized: false  // Required for Railway MySQL
-    }
+    queueLimit: 0
   }).promise();
 } else {
-  // Fallback to individual variables
-  console.log('   Fallback to individual variables');
+  // Use individual variables
+  console.log('   Host:', process.env.MYSQL_HOST);
+  console.log('   Database:', process.env.MYSQL_DATABASE);
+  console.log('   Port:', process.env.MYSQL_PORT);
   db = mysql.createPool({
-    host: process.env.MYSQL_HOST || 'localhost',
-    user: process.env.MYSQL_USER || 'root',
-    password: process.env.MYSQL_PASSWORD || '',
-    database: process.env.MYSQL_DATABASE || 'smart_panchayat',
-    port: process.env.MYSQL_PORT || 3306,
+    host: process.env.MYSQL_HOST,
+    user: process.env.MYSQL_USER,
+    password: process.env.MYSQL_PASSWORD,
+    database: process.env.MYSQL_DATABASE,
+    port: parseInt(process.env.MYSQL_PORT) || 3306,
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0,
-    ssl: {
-      rejectUnauthorized: false
-    }
+    queueLimit: 0
   }).promise();
 }
 
@@ -57,29 +59,11 @@ if (process.env.MYSQL_URL) {
   try {
     await db.query('SELECT 1');
     console.log('✅ MySQL database connected successfully');
-    
-    // Show database name
-    const [dbResult] = await db.query('SELECT DATABASE() as db_name');
-    console.log('📊 Connected to database:', dbResult[0].db_name);
-    
-    // Check tables
-    const [tables] = await db.query('SHOW TABLES');
-    if (tables.length === 0) {
-      console.log('⚠️  No tables found. Please run the database schema.');
-      console.log('   Use Railway MySQL command line to create tables.');
-    } else {
-      console.log(`📊 Found ${tables.length} tables:`);
-      tables.forEach(table => {
-        console.log('   -', Object.values(table)[0]);
-      });
-    }
   } catch (error) {
     console.error('❌ MySQL connection failed:', error.message);
-    console.error('   Please check your MYSQL_URL variable');
   }
 })();
 
-// ... rest of your code continues
 // ==================== OTP STORE ====================
 const otpStore = new Map();
 
