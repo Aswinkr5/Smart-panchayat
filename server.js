@@ -152,8 +152,6 @@ function getUnitForType(type, sensorName) {
   }
 }
 
-// Generate and write mock data for all sensors
-// Generate and write mock data for all sensors
 async function generateMockData() {
   try {
     const [sensors] = await db.query(
@@ -172,15 +170,11 @@ async function generateMockData() {
       const value = parseFloat(getRandomValueForType(sensor.type, sensor.name));
       const unit = getUnitForType(sensor.type, sensor.name);
       
-      // Use the sensor type as the field name
       let fieldName = sensor.type;
       if (fieldName === 'water_level') fieldName = 'water_level';
       if (fieldName === 'water_quality') fieldName = 'water_quality';
       if (fieldName === 'air_quality') fieldName = 'air_quality';
       
-      console.log(`   Writing: ${sensor.name} -> ${fieldName} = ${value} ${unit}`);
-      
-      // Write to InfluxDB - store numeric value directly as the field
       const point = new Point('sensor_data')
         .tag('devEUI', sensor.devEUI)
         .floatField(fieldName, value);
@@ -200,7 +194,7 @@ async function generateMockData() {
     console.error('❌ Mock data generation error:', error);
   }
 }
-// Debug endpoint to check raw data for a sensor
+
 app.get('/api/debug/raw-sensor-data/:devEUI', async (req, res) => {
   try {
     const { devEUI } = req.params;
@@ -227,7 +221,6 @@ app.get('/api/debug/raw-sensor-data/:devEUI', async (req, res) => {
   }
 });
 
-// Generate historical data for past 24 hours
 async function generateHistoricalData() {
   try {
     const [sensors] = await db.query('SELECT devEUI, name, type FROM sensors');
@@ -261,7 +254,6 @@ async function generateHistoricalData() {
   }
 }
 
-// Start/Stop mock data generator
 async function startMockDataGenerator() {
   try {
       const [rows] = await db.query(
@@ -315,11 +307,8 @@ async function getMockDataStatus() {
     }
 }
 
-// Start the generator after database connection
 setTimeout(() => {
     startMockDataGenerator();
-    // Uncomment this line ONCE to generate historical data, then comment it out
-    // generateHistoricalData();
 }, 5000);
 
 // ==================== MIDDLEWARE ====================
@@ -681,188 +670,9 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 });
 
 // ==================== SENSOR MANAGEMENT ====================
+// IMPORTANT: Specific routes FIRST, then parameter routes
 
-app.get('/api/sensors', async (req, res) => {
-  try {
-    const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, type, village, panchayat, district, state
-       FROM sensors ORDER BY id DESC`
-    );
-
-    const sensors = [];
-
-    for (const sensor of sensorRows) {
-      const { devEUI, name, type, village, panchayat, district, state } = sensor;
-
-      const dataQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> last()
-      `;
-
-      const data = await queryInfluxDB(dataQuery);
-
-      let latestValue = 'No data';
-      let latestTime = '';
-      let status = 'Offline';
-
-      if (data.length > 0) {
-        latestValue = data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
-        const t = new Date(data[0]._time);
-        latestTime = t.toLocaleString();
-        const now = new Date();
-        const diffSeconds = (now - t) / 1000;
-        status = diffSeconds <= 22 ? 'Live' : 'Offline';
-      }
-
-      sensors.push({
-        devEUI,
-        name,
-        type,
-        village,
-        panchayat,
-        district,
-        state,
-        measurement: latestValue,
-        time: latestTime,
-        status
-      });
-    }
-
-    res.json({ success: true, sensors });
-  } catch (err) {
-    console.error('❌ Error fetching sensors:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/sensors/:devEUI', async (req, res) => {
-  try {
-    const { devEUI } = req.params;
-
-    const [rows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state,
-              v.phone, v.name AS villager_name, v.aadhaar
-       FROM sensors s
-       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-       LEFT JOIN villagers v ON v.id = vs.villager_id
-       WHERE s.devEUI = ?`,
-      [devEUI]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Sensor not found' });
-    }
-
-    res.json({ success: true, sensor: rows[0] });
-  } catch (err) {
-    console.error('❌ Error fetching sensor:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.post('/api/sensors', async (req, res) => {
-  const { devEUI, deviceName, type, village, panchayat, district, state, phone } = req.body;
-
-  if (!devEUI || !deviceName) {
-    return res.status(400).json({ success: false, error: 'devEUI and deviceName are required' });
-  }
-
-  let sensorType = type || determineSensorType(deviceName);
-
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
-
-    const [sensorResult] = await conn.query(
-      `INSERT INTO sensors (devEUI, name, type, village, panchayat, district, state)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [devEUI, deviceName, sensorType, village || null, panchayat || null, district || null, state || null]
-    );
-
-    const sensorId = sensorResult.insertId;
-
-    if (phone) {
-      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
-      if (!villager) throw new Error('No villager found with this phone number');
-      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, ?, ?)`, [villager.id, sensorId, phone]);
-    }
-
-    await conn.commit();
-    res.json({ success: true, message: phone ? 'Sensor registered and mapped to villager' : 'Sensor registered successfully' });
-  } catch (err) {
-    await conn.rollback();
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ success: false, error: 'Sensor already exists' });
-    }
-    res.status(400).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
-  }
-});
-
-app.put('/api/sensors/:devEUI', async (req, res) => {
-  const { devEUI } = req.params;
-  const { deviceName, type, village, panchayat, district, state, phone } = req.body;
-
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
-
-    const [result] = await conn.query(
-      `UPDATE sensors SET name = ?, type = ?, village = ?, panchayat = ?, district = ?, state = ? WHERE devEUI = ?`,
-      [deviceName, type || 'general', village || null, panchayat || null, district || null, state || null, devEUI]
-    );
-
-    if (result.affectedRows === 0) throw new Error('Sensor not found');
-
-    await conn.query(`DELETE FROM villager_sensors WHERE sensor_id = (SELECT id FROM sensors WHERE devEUI = ?)`, [devEUI]);
-
-    if (phone) {
-      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
-      if (!villager) throw new Error('Villager not found');
-      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?), ?)`, [villager.id, devEUI, phone]);
-    }
-
-    await conn.commit();
-    res.json({ success: true });
-  } catch (err) {
-    await conn.rollback();
-    res.status(400).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
-  }
-});
-
-app.delete('/api/sensors/:devEUI', async (req, res) => {
-  const { devEUI } = req.params;
-
-  if (!devEUI) return res.status(400).json({ success: false, error: 'devEUI is required' });
-
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
-
-    const [[sensor]] = await conn.query(`SELECT id FROM sensors WHERE devEUI = ?`, [devEUI]);
-    if (!sensor) return res.status(404).json({ success: false, error: 'Sensor not found' });
-
-    await conn.query(`DELETE FROM villager_sensors WHERE sensor_id = ?`, [sensor.id]);
-    await conn.query(`DELETE FROM sensors WHERE id = ?`, [sensor.id]);
-
-    await conn.commit();
-    res.json({ success: true, message: 'Sensor deleted successfully' });
-  } catch (err) {
-    await conn.rollback();
-    res.status(500).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
-  }
-});
-
-// ==================== DISTRICT-BASED SENSOR QUERY ====================
-
+// 1. SPECIFIC ROUTE: Get sensors by district
 app.get('/api/sensors/by-district', async (req, res) => {
   try {
     const { district } = req.query;
@@ -926,6 +736,317 @@ app.get('/api/sensors/by-district', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// 2. SPECIFIC ROUTE: Get district statistics
+app.get('/api/district-stats/:district', async (req, res) => {
+  try {
+    const { district } = req.params;
+    
+    console.log(`📍 Fetching statistics for district: ${district}`);
+    
+    const [sensorRows] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       WHERE s.district = ? AND vs.id IS NULL
+       ORDER BY s.type ASC`,
+      [district]
+    );
+    
+    console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
+    
+    const sensorsByType = {
+      temperature: [],
+      humidity: [],
+      water_quality: [],
+      air_quality: []
+    };
+    
+    for (const sensor of sensorRows) {
+      const sensorType = sensor.type;
+      if (sensorsByType[sensorType]) {
+        sensorsByType[sensorType].push(sensor);
+      }
+    }
+    
+    const stats = {};
+    
+    for (const [type, sensors] of Object.entries(sensorsByType)) {
+      if (sensors.length === 0) continue;
+      
+      let total = 0;
+      let validCount = 0;
+      const sensorValues = [];
+      
+      for (const sensor of sensors) {
+        const dataQuery = `
+          from(bucket: "${INFLUX_CONFIG.bucket}")
+            |> range(start: -5m)
+            |> filter(fn: (r) => r._measurement == "sensor_data")
+            |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+            |> last()
+        `;
+        
+        const data = await queryInfluxDB(dataQuery);
+        
+        if (data.length > 0) {
+          let value = null;
+          
+          if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
+            value = data[0][type];
+          } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
+            value = data[0]._value;
+          } else if (data[0].value !== undefined && typeof data[0].value === 'number') {
+            value = data[0].value;
+          }
+          
+          if (value !== null && value > 0) {
+            total += value;
+            validCount++;
+            sensorValues.push({
+              name: sensor.name,
+              village: sensor.village,
+              value: value
+            });
+          }
+        }
+      }
+      
+      if (validCount > 0) {
+        const average = total / validCount;
+        stats[type] = {
+          count: validCount,
+          totalSensors: sensors.length,
+          average: average,
+          unit: _getUnitForType(type),
+          sensors: sensorValues,
+          lastUpdated: new Date().toISOString()
+        };
+      } else {
+        stats[type] = {
+          count: 0,
+          totalSensors: sensors.length,
+          average: null,
+          unit: _getUnitForType(type),
+          sensors: [],
+          lastUpdated: null
+        };
+      }
+    }
+    
+    console.log(`✅ Calculated stats for ${district}:`, Object.keys(stats));
+    
+    res.json({
+      success: true,
+      district: district,
+      stats: stats,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('❌ Error fetching district statistics:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+function _getUnitForType(type) {
+  switch(type) {
+    case 'temperature': return '°C';
+    case 'humidity': return '%';
+    case 'water_quality': return 'pH';
+    case 'air_quality': return 'AQI';
+    default: return '';
+  }
+}
+
+// 3. PARAMETER ROUTE: Get single sensor
+app.get('/api/sensors/:devEUI', async (req, res) => {
+  try {
+    const { devEUI } = req.params;
+
+    const [rows] = await db.query(
+      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state,
+              v.phone, v.name AS villager_name, v.aadhaar
+       FROM sensors s
+       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+       LEFT JOIN villagers v ON v.id = vs.villager_id
+       WHERE s.devEUI = ?`,
+      [devEUI]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Sensor not found' });
+    }
+
+    res.json({ success: true, sensor: rows[0] });
+  } catch (err) {
+    console.error('❌ Error fetching sensor:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. GENERAL ROUTE: Get all sensors
+app.get('/api/sensors', async (req, res) => {
+  try {
+    const [sensorRows] = await db.query(
+      `SELECT id, devEUI, name, type, village, panchayat, district, state
+       FROM sensors ORDER BY id DESC`
+    );
+
+    const sensors = [];
+
+    for (const sensor of sensorRows) {
+      const { devEUI, name, type, village, panchayat, district, state } = sensor;
+
+      const dataQuery = `
+        from(bucket: "${INFLUX_CONFIG.bucket}")
+          |> range(start: -5m)
+          |> filter(fn: (r) => r._measurement == "sensor_data")
+          |> filter(fn: (r) => r.devEUI == "${devEUI}")
+          |> last()
+      `;
+
+      const data = await queryInfluxDB(dataQuery);
+
+      let latestValue = 'No data';
+      let latestTime = '';
+      let status = 'Offline';
+
+      if (data.length > 0) {
+        latestValue = data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
+        const t = new Date(data[0]._time);
+        latestTime = t.toLocaleString();
+        const now = new Date();
+        const diffSeconds = (now - t) / 1000;
+        status = diffSeconds <= 22 ? 'Live' : 'Offline';
+      }
+
+      sensors.push({
+        devEUI,
+        name,
+        type,
+        village,
+        panchayat,
+        district,
+        state,
+        measurement: latestValue,
+        time: latestTime,
+        status
+      });
+    }
+
+    res.json({ success: true, sensors });
+  } catch (err) {
+    console.error('❌ Error fetching sensors:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Add new sensor
+app.post('/api/sensors', async (req, res) => {
+  const { devEUI, deviceName, type, village, panchayat, district, state, phone } = req.body;
+
+  if (!devEUI || !deviceName) {
+    return res.status(400).json({ success: false, error: 'devEUI and deviceName are required' });
+  }
+
+  let sensorType = type || determineSensorType(deviceName);
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [sensorResult] = await conn.query(
+      `INSERT INTO sensors (devEUI, name, type, village, panchayat, district, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [devEUI, deviceName, sensorType, village || null, panchayat || null, district || null, state || null]
+    );
+
+    const sensorId = sensorResult.insertId;
+
+    if (phone) {
+      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
+      if (!villager) throw new Error('No villager found with this phone number');
+      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, ?, ?)`, [villager.id, sensorId, phone]);
+    }
+
+    await conn.commit();
+    res.json({ success: true, message: phone ? 'Sensor registered and mapped to villager' : 'Sensor registered successfully' });
+  } catch (err) {
+    await conn.rollback();
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, error: 'Sensor already exists' });
+    }
+    res.status(400).json({ success: false, error: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
+// 6. Update sensor
+app.put('/api/sensors/:devEUI', async (req, res) => {
+  const { devEUI } = req.params;
+  const { deviceName, type, village, panchayat, district, state, phone } = req.body;
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [result] = await conn.query(
+      `UPDATE sensors SET name = ?, type = ?, village = ?, panchayat = ?, district = ?, state = ? WHERE devEUI = ?`,
+      [deviceName, type || 'general', village || null, panchayat || null, district || null, state || null, devEUI]
+    );
+
+    if (result.affectedRows === 0) throw new Error('Sensor not found');
+
+    await conn.query(`DELETE FROM villager_sensors WHERE sensor_id = (SELECT id FROM sensors WHERE devEUI = ?)`, [devEUI]);
+
+    if (phone) {
+      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
+      if (!villager) throw new Error('Villager not found');
+      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?), ?)`, [villager.id, devEUI, phone]);
+    }
+
+    await conn.commit();
+    res.json({ success: true });
+  } catch (err) {
+    await conn.rollback();
+    res.status(400).json({ success: false, error: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
+// 7. Delete sensor
+app.delete('/api/sensors/:devEUI', async (req, res) => {
+  const { devEUI } = req.params;
+
+  if (!devEUI) return res.status(400).json({ success: false, error: 'devEUI is required' });
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[sensor]] = await conn.query(`SELECT id FROM sensors WHERE devEUI = ?`, [devEUI]);
+    if (!sensor) return res.status(404).json({ success: false, error: 'Sensor not found' });
+
+    await conn.query(`DELETE FROM villager_sensors WHERE sensor_id = ?`, [sensor.id]);
+    await conn.query(`DELETE FROM sensors WHERE id = ?`, [sensor.id]);
+
+    await conn.commit();
+    res.json({ success: true, message: 'Sensor deleted successfully' });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
+// ==================== DISTRICT ENDPOINTS ====================
 
 app.get('/api/districts', async (req, res) => {
   try {
@@ -1430,8 +1551,6 @@ app.get('/api/debug/villages', async (req, res) => {
   }
 });
 
-// Get sensor history for graphing
-// Get sensor history for graphing
 app.get('/api/sensors/:devEUI/history', async (req, res) => {
   try {
     const { devEUI } = req.params;
@@ -1440,7 +1559,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
 
     console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
 
-    // Get the sensor type
     const [sensorInfo] = await db.query(
       'SELECT type FROM sensors WHERE devEUI = ?',
       [devEUI]
@@ -1449,7 +1567,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     
     console.log(`📊 Sensor type: ${sensorType}`);
 
-    // Query InfluxDB - get all fields
     const fluxQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: ${rangeValue})
@@ -1466,33 +1583,26 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       return res.json({ success: true, history: [], count: 0 });
     }
 
-    // Extract numeric values
     const history = [];
     
     for (const row of rows) {
       let value = null;
       
-      // Check if this is a numeric field (table 1 format)
       if (row._field === sensorType && row._value !== undefined) {
-        // This is the newer format with numeric values
         value = parseFloat(row._value);
       }
-      // Check for direct numeric field
       else if (row[sensorType] !== undefined && typeof row[sensorType] === 'number') {
         value = row[sensorType];
       }
-      // Check for generic numeric value field
       else if (row.value !== undefined && typeof row.value === 'number') {
         value = row.value;
       }
-      // Check for string measurement format (older format)
       else if (row.measurement && typeof row.measurement === 'string') {
         const match = row.measurement.match(/(\d+(?:\.\d+)?)/);
         if (match) {
           value = parseFloat(match[1]);
         }
       }
-      // Also check if the row has a field that matches the sensor type with numeric value
       else if (row[sensorType] !== undefined) {
         const val = row[sensorType];
         if (typeof val === 'number') {
@@ -1503,7 +1613,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
         }
       }
       
-      // Only add valid numeric values (not the string measurement ones)
       if (value !== null && !isNaN(value) && value > 0) {
         history.push({
           time: row._time,
@@ -1513,7 +1622,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       }
     }
 
-    // Sort by time (already sorted from query)
     console.log(`✅ Returning ${history.length} valid numeric data points`);
     if (history.length > 0) {
       console.log(`📊 Values: ${history.slice(0, 10).map(h => h.value).join(', ')}...`);
@@ -1533,137 +1641,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     });
   }
 });
-
-// Get district statistics (average values for unmapped sensors only)
-app.get('/api/district-stats/:district', async (req, res) => {
-  try {
-    const { district } = req.params;
-    
-    console.log(`📍 Fetching statistics for district: ${district}`);
-    
-    // Get all sensors in the district that are NOT mapped to any villager
-    const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-       FROM sensors s
-       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-       WHERE s.district = ? AND vs.id IS NULL
-       ORDER BY s.type ASC`,
-      [district]
-    );
-    
-    console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
-    
-    // Group sensors by type
-    const sensorsByType = {
-      temperature: [],
-      humidity: [],
-      water_quality: [],
-      air_quality: []
-    };
-    
-    for (const sensor of sensorRows) {
-      const sensorType = sensor.type;
-      if (sensorsByType[sensorType]) {
-        sensorsByType[sensorType].push(sensor);
-      }
-    }
-    
-    // Fetch latest values from InfluxDB and calculate averages
-    const stats = {};
-    
-    for (const [type, sensors] of Object.entries(sensorsByType)) {
-      if (sensors.length === 0) continue;
-      
-      let total = 0;
-      let validCount = 0;
-      const sensorValues = [];
-      
-      for (const sensor of sensors) {
-        const dataQuery = `
-          from(bucket: "${INFLUX_CONFIG.bucket}")
-            |> range(start: -5m)
-            |> filter(fn: (r) => r._measurement == "sensor_data")
-            |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-            |> last()
-        `;
-        
-        const data = await queryInfluxDB(dataQuery);
-        
-        if (data.length > 0) {
-          let value = null;
-          
-          // Extract numeric value
-          if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
-            value = data[0][type];
-          } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
-            value = data[0]._value;
-          } else if (data[0].value !== undefined && typeof data[0].value === 'number') {
-            value = data[0].value;
-          }
-          
-          if (value !== null && value > 0) {
-            total += value;
-            validCount++;
-            sensorValues.push({
-              name: sensor.name,
-              village: sensor.village,
-              value: value
-            });
-          }
-        }
-      }
-      
-      if (validCount > 0) {
-        const average = total / validCount;
-        stats[type] = {
-          count: validCount,
-          totalSensors: sensors.length,
-          average: average,
-          unit: _getUnitForType(type),
-          sensors: sensorValues,
-          lastUpdated: new Date().toISOString()
-        };
-      } else {
-        stats[type] = {
-          count: 0,
-          totalSensors: sensors.length,
-          average: null,
-          unit: _getUnitForType(type),
-          sensors: [],
-          lastUpdated: null
-        };
-      }
-    }
-    
-    console.log(`✅ Calculated stats for ${district}:`, Object.keys(stats));
-    
-    res.json({
-      success: true,
-      district: district,
-      stats: stats,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (err) {
-    console.error('❌ Error fetching district statistics:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// Helper function to get unit based on sensor type
-function _getUnitForType(type) {
-  switch(type) {
-    case 'temperature': return '°C';
-    case 'humidity': return '%';
-    case 'water_quality': return 'pH';
-    case 'air_quality': return 'AQI';
-    default: return '';
-  }
-}
-
 
 // ==================== SERVING HTML PAGES ====================
 
@@ -1708,13 +1685,14 @@ app.listen(PORT, () => {
   console.log('✅ Available API Endpoints:');
   console.log('   GET  /api/villagers');
   console.log('   GET  /api/sensors');
+  console.log('   GET  /api/sensors/by-district?district=Kasaragod');
+  console.log('   GET  /api/district-stats/:district');
   console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
   console.log('   GET  /api/admin/dashboard');
   console.log('   GET  /api/admin/mock-status');
   console.log('   POST /api/admin/mock-enable');
   console.log('   POST /api/admin/mock-disable');
   console.log('   POST /api/admin/mock-generate');
-  console.log('   GET  /api/sensors/by-district?district=Kasaragod');
   console.log('   GET  /api/districts');
   console.log('   GET  /api/debug/latest-sensor-data');
   console.log('   GET  /api/debug/sensor-history/:devEUI');
