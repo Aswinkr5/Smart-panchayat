@@ -1714,6 +1714,132 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
   }
 });
 
+// Get statistics for all districts at once
+app.get('/api/all-district-stats', async (req, res) => {
+  try {
+    console.log('📍 Fetching statistics for all districts');
+    
+    // Get all districts that have sensors
+    const [districtRows] = await db.query(
+      `SELECT DISTINCT district FROM sensors WHERE district IS NOT NULL AND district != '' ORDER BY district`
+    );
+    
+    const allDistricts = districtRows.map(row => row.district);
+    console.log(`📊 Found ${allDistricts.length} districts:`, allDistricts);
+    
+    const allStats = {};
+    
+    for (const district of allDistricts) {
+      // Get all unmapped sensors in this district
+      const [sensorRows] = await db.query(
+        `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
+         FROM sensors s
+         LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
+         WHERE s.district = ? AND vs.id IS NULL
+         ORDER BY s.type ASC`,
+        [district]
+      );
+      
+      // Group sensors by type
+      const sensorsByType = {
+        temperature: [],
+        humidity: [],
+        water_quality: [],
+        air_quality: []
+      };
+      
+      for (const sensor of sensorRows) {
+        const sensorType = sensor.type;
+        if (sensorsByType[sensorType]) {
+          sensorsByType[sensorType].push(sensor);
+        }
+      }
+      
+      const districtStats = {};
+      
+      for (const [type, sensors] of Object.entries(sensorsByType)) {
+        if (sensors.length === 0) continue;
+        
+        let total = 0;
+        let validCount = 0;
+        
+        // Fetch values for all sensors of this type in parallel
+        const promises = sensors.map(async (sensor) => {
+          const dataQuery = `
+            from(bucket: "${INFLUX_CONFIG.bucket}")
+              |> range(start: -5m)
+              |> filter(fn: (r) => r._measurement == "sensor_data")
+              |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
+              |> last()
+          `;
+          const data = await queryInfluxDB(dataQuery);
+          
+          if (data.length > 0) {
+            let value = null;
+            if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
+              value = data[0][type];
+            } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
+              value = data[0]._value;
+            }
+            return value;
+          }
+          return null;
+        });
+        
+        const values = await Promise.all(promises);
+        
+        for (const value of values) {
+          if (value !== null && value > 0) {
+            total += value;
+            validCount++;
+          }
+        }
+        
+        if (validCount > 0) {
+          districtStats[type] = {
+            count: validCount,
+            totalSensors: sensors.length,
+            average: total / validCount,
+            unit: _getUnitForType(type),
+          };
+        } else {
+          districtStats[type] = {
+            count: 0,
+            totalSensors: sensors.length,
+            average: null,
+            unit: _getUnitForType(type),
+          };
+        }
+      }
+      
+      allStats[district] = districtStats;
+    }
+    
+    res.json({
+      success: true,
+      stats: allStats,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('❌ Error fetching all district stats:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+function _getUnitForType(type) {
+  switch(type) {
+    case 'temperature': return '°C';
+    case 'humidity': return '%';
+    case 'water_quality': return 'pH';
+    case 'air_quality': return 'AQI';
+    default: return '';
+  }
+}
+
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
