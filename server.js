@@ -92,6 +92,198 @@ if (process.env.MYSQL_URL) {
 // ==================== OTP STORE ====================
 const otpStore = new Map();
 
+const VILLAGER_WITH_LOCATION_SQL = `
+  SELECT
+    v.id,
+    v.name,
+    v.phone,
+    v.address,
+    v.panchayat_id,
+    p.name AS panchayat_name,
+    p.state AS panchayat_state,
+    parent.name AS parent_name,
+    parent.type AS parent_type,
+    parent.state AS parent_state,
+    grandparent.name AS grandparent_name,
+    grandparent.type AS grandparent_type,
+    grandparent.state AS grandparent_state
+  FROM villagers v
+  LEFT JOIN locations p ON p.id = v.panchayat_id
+  LEFT JOIN locations parent ON parent.id = p.parent_id
+  LEFT JOIN locations grandparent ON grandparent.id = parent.parent_id
+`;
+
+const SENSOR_WITH_LOCATION_SQL = `
+  SELECT
+    s.id AS sensor_id,
+    s.name AS sensor_name,
+    s.type AS sensor_type,
+    s.status AS sensor_status,
+    s.location_description,
+    s.villager_id,
+    s.panchayat_id,
+    s.district_id,
+    s.installed_at,
+    s.updated_at,
+    p.name AS panchayat_name,
+    p.state AS panchayat_state,
+    parent.name AS parent_name,
+    parent.type AS parent_type,
+    parent.state AS parent_state,
+    grandparent.name AS grandparent_name,
+    grandparent.type AS grandparent_type,
+    grandparent.state AS grandparent_state,
+    d.name AS district_name,
+    d.state AS district_state
+  FROM sensors s
+  LEFT JOIN locations p ON p.id = s.panchayat_id
+  LEFT JOIN locations parent ON parent.id = p.parent_id
+  LEFT JOIN locations grandparent ON grandparent.id = parent.parent_id
+  LEFT JOIN locations d ON d.id = s.district_id
+`;
+
+function extractVillageLabel(address, fallback = '') {
+  if (!address) return fallback;
+  const firstPart = String(address)
+    .split(',')
+    .map(part => part.trim())
+    .find(Boolean);
+  return firstPart || fallback;
+}
+
+function resolveDistrictName(row) {
+  if (row.district_name) return row.district_name;
+  if (row.parent_type === 'district') return row.parent_name || '';
+  if (row.grandparent_type === 'district') return row.grandparent_name || '';
+  return '';
+}
+
+function resolveStateName(row) {
+  return (
+    row.district_state ||
+    row.panchayat_state ||
+    row.parent_state ||
+    row.grandparent_state ||
+    'Kerala'
+  );
+}
+
+function normalizeVillager(row) {
+  const panchayat = row.panchayat_name || '';
+  const district = resolveDistrictName(row);
+  const state = resolveStateName(row);
+  const village = extractVillageLabel(row.address, panchayat);
+
+  return {
+    id: row.id,
+    name: row.name,
+    phone: row.phone,
+    address: row.address || '',
+    village,
+    panchayat,
+    district,
+    state,
+    role: 'villager'
+  };
+}
+
+function normalizeSensorLocation(row) {
+  const panchayat = row.panchayat_name || '';
+  const district = resolveDistrictName(row);
+  const state = resolveStateName(row);
+  const village = row.location_description || panchayat || '';
+
+  return {
+    village,
+    panchayat,
+    district,
+    state
+  };
+}
+
+async function fetchVillagerByPhone(phone, conn = db) {
+  const [rows] = await conn.query(
+    `${VILLAGER_WITH_LOCATION_SQL} WHERE v.phone = ?`,
+    [phone]
+  );
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return normalizeVillager(rows[0]);
+}
+
+async function fetchLatestSensorSnapshot(sensorId, sensorType) {
+  const dataQuery = `
+    from(bucket: "${INFLUX_CONFIG.bucket}")
+      |> range(start: -5m)
+      |> filter(fn: (r) => r._measurement == "sensor_data")
+      |> filter(fn: (r) => r.devEUI == "${sensorId}")
+      |> last()
+  `;
+
+  const data = await queryInfluxDB(dataQuery);
+
+  let measurement = 'No data';
+  let time = '';
+  let status = 'Offline';
+
+  if (data.length > 0) {
+    if (data[0][sensorType] !== undefined) {
+      measurement = `${sensorType}: ${data[0][sensorType]}`;
+    } else {
+      measurement =
+        data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
+    }
+
+    const readingTime = new Date(data[0]._time);
+    time = readingTime.toLocaleString();
+    const diffSeconds = (Date.now() - readingTime.getTime()) / 1000;
+    status = diffSeconds <= 22 ? 'Live' : 'Offline';
+  }
+
+  return { measurement, time, status };
+}
+
+async function buildSensorPayload(row, { includeAssignment = true } = {}) {
+  const location = normalizeSensorLocation(row);
+  const latest = await fetchLatestSensorSnapshot(row.sensor_id, row.sensor_type);
+
+  return {
+    id: row.sensor_id,
+    devEUI: row.sensor_id,
+    name: row.sensor_name,
+    type: row.sensor_type,
+    village: location.village,
+    panchayat: location.panchayat,
+    district: location.district,
+    state: location.state,
+    measurement: latest.measurement,
+    time: latest.time,
+    status: latest.status,
+    ...(includeAssignment ? { isAssigned: row.villager_id !== null } : {})
+  };
+}
+
+function extractNumericValue(input) {
+  if (typeof input === 'number' && !Number.isNaN(input)) {
+    return input;
+  }
+
+  if (input === null || input === undefined) {
+    return null;
+  }
+
+  const match = String(input).match(/[-+]?\d*\.?\d+/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = parseFloat(match[0]);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 // ==================== MOCK DATA GENERATOR ====================
 
 const MOCK_CONFIG = {
@@ -685,89 +877,23 @@ app.get('/api/sensors/by-district', async (req, res) => {
       });
     }
 
-    // Get sensors from MySQL by district
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, type, village, panchayat, district, state
-       FROM sensors 
-       WHERE district = ? 
-       ORDER BY name ASC`,
-      [district]
+      `${SENSOR_WITH_LOCATION_SQL}
+       WHERE (
+         d.name = ?
+         OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
+         OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
+       )
+       ORDER BY s.name ASC`,
+      [district, district, district]
     );
 
     console.log(`📊 Found ${sensorRows.length} sensors in ${district} district`);
 
     const sensors = [];
 
-    for (const sensor of sensorRows) {
-      const { id, devEUI, name, type, village, panchayat, district: sensorDistrict, state } = sensor;
-
-      // Check if sensor is already assigned to any villager (has phone number)
-      let isAssigned = false;
-      try {
-        const [assignmentRows] = await db.query(
-          `SELECT phone FROM villager_sensors WHERE sensor_id = ?`,
-          [id]
-        );
-        // Check if there's a row AND phone exists AND phone is not empty
-        if (assignmentRows && assignmentRows.length > 0) {
-          const phone = assignmentRows[0].phone;
-          isAssigned = phone !== null && phone !== undefined && phone !== '';
-        }
-        console.log(`Sensor ${devEUI}: isAssigned = ${isAssigned}`);
-      } catch (err) {
-        console.log(`Error checking assignment for sensor ${devEUI}:`, err.message);
-        isAssigned = false;
-      }
-
-      // Get latest reading from InfluxDB
-      let latestValue = 'No data';
-      let latestTime = '';
-      let status = 'Offline';
-      
-      try {
-        const dataQuery = `
-          from(bucket: "${INFLUX_CONFIG.bucket}")
-            |> range(start: -5m)
-            |> filter(fn: (r) => r._measurement == "sensor_data")
-            |> filter(fn: (r) => r.devEUI == "${devEUI}")
-            |> last()
-        `;
-
-        const data = await queryInfluxDB(dataQuery);
-
-        if (data && data.length > 0) {
-          // Try to get measurement from the field
-          if (data[0][type] !== undefined) {
-            latestValue = `${type}: ${data[0][type]}`;
-          } else if (data[0].measurement) {
-            latestValue = data[0].measurement;
-          } else if (data[0]._field && data[0]._value) {
-            latestValue = `${data[0]._field}: ${data[0]._value}`;
-          }
-          
-          const t = new Date(data[0]._time);
-          latestTime = t.toLocaleString();
-          const now = new Date();
-          const diffSeconds = (now - t) / 1000;
-          status = diffSeconds <= 22 ? 'Live' : 'Offline';
-        }
-      } catch (err) {
-        console.log(`Error fetching InfluxDB data for sensor ${devEUI}:`, err.message);
-      }
-
-      sensors.push({
-        devEUI,
-        name,
-        type,
-        village: village || 'Unknown',
-        panchayat: panchayat || 'Unknown',
-        district: sensorDistrict,
-        state: state || '',
-        measurement: latestValue,
-        time: latestTime,
-        status,
-        isAssigned
-      });
+    for (const sensorRow of sensorRows) {
+      sensors.push(await buildSensorPayload(sensorRow));
     }
 
     res.json({
@@ -794,14 +920,16 @@ app.get('/api/district-stats/:district', async (req, res) => {
     
     console.log(`📍 Fetching statistics for district: ${district}`);
     
-    // Get all sensors in the district that are NOT mapped (no phone number)
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-       FROM sensors s
-       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-       WHERE s.district = ? AND (vs.phone IS NULL OR vs.phone = '')
-       ORDER BY s.type ASC`,
-      [district]
+      `${SENSOR_WITH_LOCATION_SQL}
+       WHERE s.villager_id IS NULL
+         AND (
+           d.name = ?
+           OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
+           OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
+         )
+       ORDER BY s.type ASC, s.name ASC`,
+      [district, district, district]
     );
     
     console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
@@ -815,7 +943,7 @@ app.get('/api/district-stats/:district', async (req, res) => {
     };
     
     for (const sensor of sensorRows) {
-      const sensorType = sensor.type;
+      const sensorType = sensor.sensor_type;
       if (sensorsByType[sensorType]) {
         sensorsByType[sensorType].push(sensor);
       }
@@ -832,39 +960,23 @@ app.get('/api/district-stats/:district', async (req, res) => {
       
       for (const sensor of sensors) {
         try {
-          const dataQuery = `
-            from(bucket: "${INFLUX_CONFIG.bucket}")
-              |> range(start: -5m)
-              |> filter(fn: (r) => r._measurement == "sensor_data")
-              |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-              |> last()
-          `;
-          
-          const data = await queryInfluxDB(dataQuery);
-          
-          if (data && data.length > 0) {
-            let value = null;
-            
-            if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
-              value = data[0][type];
-            } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
-              value = data[0]._value;
-            } else if (data[0].value !== undefined && typeof data[0].value === 'number') {
-              value = data[0].value;
-            }
-            
-            if (value !== null && value > 0) {
-              total += value;
-              validCount++;
-              sensorValues.push({
-                name: sensor.name,
-                village: sensor.village,
-                value: value
-              });
-            }
+          const snapshot = await fetchLatestSensorSnapshot(
+            sensor.sensor_id,
+            sensor.sensor_type
+          );
+          const value = extractNumericValue(snapshot.measurement);
+
+          if (value !== null && value > 0) {
+            total += value;
+            validCount++;
+            sensorValues.push({
+              name: sensor.sensor_name,
+              village: normalizeSensorLocation(sensor).village,
+              value
+            });
           }
         } catch (err) {
-          console.log(`Error fetching data for sensor ${sensor.devEUI}:`, err.message);
+          console.log(`Error fetching data for sensor ${sensor.sensor_id}:`, err.message);
         }
       }
       
@@ -925,12 +1037,8 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
     const { devEUI } = req.params;
 
     const [rows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state,
-              v.phone, v.name AS villager_name, v.aadhaar
-       FROM sensors s
-       LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-       LEFT JOIN villagers v ON v.id = vs.villager_id
-       WHERE s.devEUI = ?`,
+      `${SENSOR_WITH_LOCATION_SQL}
+       WHERE s.id = ?`,
       [devEUI]
     );
 
@@ -938,7 +1046,8 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Sensor not found' });
     }
 
-    res.json({ success: true, sensor: rows[0] });
+    const sensor = await buildSensorPayload(rows[0]);
+    res.json({ success: true, sensor });
   } catch (err) {
     console.error('❌ Error fetching sensor:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -1107,8 +1216,13 @@ app.delete('/api/sensors/:devEUI', async (req, res) => {
 
 app.get('/api/districts', async (req, res) => {
   try {
-    const [rows] = await db.query(`SELECT DISTINCT district FROM sensors WHERE district IS NOT NULL AND district != '' ORDER BY district`);
-    const districts = rows.map(row => row.district);
+    const [rows] = await db.query(
+      `SELECT DISTINCT name
+       FROM locations
+       WHERE type = 'district'
+       ORDER BY name`
+    );
+    const districts = rows.map(row => row.name);
     res.json({ success: true, districts, count: districts.length });
   } catch (err) {
     console.error('❌ Error fetching districts:', err);
@@ -1123,59 +1237,21 @@ app.get('/api/mobile/sensors', async (req, res) => {
     const { phone } = req.query;
     if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
 
-    const [[villager]] = await db.query(
-      `SELECT id, name, phone, village, panchayat, district, state FROM villagers WHERE phone = ?`,
-      [phone]
-    );
+    const villager = await fetchVillagerByPhone(phone);
 
     if (!villager) return res.status(404).json({ success: false, error: 'Villager not found' });
 
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-       FROM sensors s JOIN villager_sensors vs ON vs.sensor_id = s.id WHERE vs.villager_id = ? ORDER BY s.id DESC`,
+      `${SENSOR_WITH_LOCATION_SQL}
+       WHERE s.villager_id = ?
+       ORDER BY s.installed_at DESC, s.updated_at DESC, s.id DESC`,
       [villager.id]
     );
 
     const sensors = [];
 
-    for (const sensor of sensorRows) {
-      const { devEUI, name, type, village, panchayat, district, state } = sensor;
-
-      const dataQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> last()
-      `;
-
-      const data = await queryInfluxDB(dataQuery);
-
-      let latestValue = 'No data';
-      let latestTime = '';
-      let status = 'Offline';
-
-      if (data.length > 0) {
-        latestValue = data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
-        const t = new Date(data[0]._time);
-        latestTime = t.toLocaleString();
-        const now = new Date();
-        const diffSeconds = (now - t) / 1000;
-        status = diffSeconds <= 22 ? 'Live' : 'Offline';
-      }
-
-      sensors.push({
-        devEUI,
-        name,
-        type,
-        village,
-        panchayat,
-        district,
-        state,
-        measurement: latestValue,
-        time: latestTime,
-        status
-      });
+    for (const sensorRow of sensorRows) {
+      sensors.push(await buildSensorPayload(sensorRow, { includeAssignment: false }));
     }
 
     res.json({
@@ -1283,13 +1359,12 @@ app.post('/api/verify/check-phone', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Please enter valid 10-digit phone number' });
     }
 
-    const [rows] = await db.query(`SELECT id, aadhaar, name, village, panchayat, district, state FROM villagers WHERE phone = ?`, [phone]);
-    if (rows.length === 0) {
+    const villager = await fetchVillagerByPhone(phone);
+    if (!villager) {
       return res.json({ success: false, error: 'Phone number not registered in our system' });
     }
 
-    const villager = rows[0];
-    res.json({ success: true, message: 'Phone number verified', villager: { ...villager, phone, role: 'villager' } });
+    res.json({ success: true, message: 'Phone number verified', villager });
   } catch (error) {
     console.error('❌ Phone check error:', error);
     res.status(500).json({ success: false, error: 'Failed to check phone number: ' + error.message });
@@ -1303,12 +1378,12 @@ app.post('/api/verify/send-otp', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Please enter valid 10-digit phone number' });
     }
 
-    const [rows] = await db.query(`SELECT aadhaar FROM villagers WHERE phone = ?`, [phone]);
-    if (rows.length === 0) return res.status(404).json({ success: false, error: 'Phone number not registered' });
+    const villager = await fetchVillagerByPhone(phone);
+    if (!villager) return res.status(404).json({ success: false, error: 'Phone number not registered' });
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = Date.now() + 5 * 60 * 1000;
-    otpStore.set(phone, { otp, expiresAt, phone, aadhaarNumber: rows[0].aadhaar, attempts: 0 });
+    otpStore.set(phone, { otp, expiresAt, phone, villagerId: villager.id, attempts: 0 });
 
     console.log(`✅ OTP ${otp} generated for phone ${phone}`);
     res.json({ success: true, message: 'OTP sent successfully', otp, test_mode: true });
@@ -1340,13 +1415,12 @@ app.post('/api/verify/check-otp', async (req, res) => {
       return res.json({ success: false, error: 'Invalid OTP. Attempts: ' + otpData.attempts });
     }
 
-    const [rows] = await db.query(`SELECT aadhaar, name, village, panchayat, district, state FROM villagers WHERE phone = ?`, [phone]);
-    if (rows.length === 0) return res.json({ success: false, error: 'Villager data not found' });
+    const villager = await fetchVillagerByPhone(phone);
+    if (!villager) return res.json({ success: false, error: 'Villager data not found' });
 
-    const villager = rows[0];
     const [[sensorCountResult]] = await db.query(
-      `SELECT COUNT(*) as sensor_count FROM villager_sensors vs JOIN villagers v ON v.id = vs.villager_id WHERE v.phone = ?`,
-      [phone]
+      `SELECT COUNT(*) as sensor_count FROM sensors WHERE villager_id = ?`,
+      [villager.id]
     );
 
     const token = 'villager-' + Date.now() + '-' + phone;
@@ -1357,7 +1431,6 @@ app.post('/api/verify/check-otp', async (req, res) => {
       token,
       user: {
         name: villager.name,
-        aadhaar_number: villager.aadhaar,
         phone,
         village: villager.village,
         panchayat: villager.panchayat,
@@ -1493,57 +1566,36 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
     const { village } = req.query;
     if (!village) return res.status(400).json({ success: false, error: 'Village name is required' });
 
-    const [villageCheck] = await db.query(`SELECT DISTINCT village FROM sensors WHERE village = ?`, [village]);
+    const searchTerm = `%${String(village).trim().toLowerCase()}%`;
+    const [villageCheck] = await db.query(
+      `${SENSOR_WITH_LOCATION_SQL}
+       WHERE s.villager_id IS NULL
+         AND (
+           LOWER(COALESCE(s.location_description, '')) LIKE ?
+           OR LOWER(COALESCE(p.name, '')) LIKE ?
+         )
+       LIMIT 1`,
+      [searchTerm, searchTerm]
+    );
+
     if (villageCheck.length === 0) {
       return res.json({ success: true, village, sensors: [], count: 0, message: `No sensors found in village "${village}"` });
     }
 
     const [sensorRows] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-       FROM sensors s LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-       WHERE s.village = ? AND vs.id IS NULL ORDER BY s.name ASC`,
-      [village]
+      `${SENSOR_WITH_LOCATION_SQL}
+       WHERE s.villager_id IS NULL
+         AND (
+           LOWER(COALESCE(s.location_description, '')) LIKE ?
+           OR LOWER(COALESCE(p.name, '')) LIKE ?
+         )
+       ORDER BY s.name ASC`,
+      [searchTerm, searchTerm]
     );
 
     const sensors = [];
-    for (const sensor of sensorRows) {
-      const { devEUI, name, type, village, panchayat, district, state } = sensor;
-
-      const dataQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> last()
-      `;
-      const data = await queryInfluxDB(dataQuery);
-
-      let latestValue = 'No data';
-      let latestTime = '';
-      let status = 'Offline';
-
-      if (data.length > 0) {
-        latestValue = data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
-        const t = new Date(data[0]._time);
-        latestTime = t.toLocaleString();
-        const now = new Date();
-        const diffSeconds = (now - t) / 1000;
-        status = diffSeconds <= 22 ? 'Live' : 'Offline';
-      }
-
-      sensors.push({
-        devEUI,
-        name,
-        type,
-        village,
-        panchayat,
-        district,
-        state,
-        measurement: latestValue,
-        time: latestTime,
-        status,
-        isAssigned: false
-      });
+    for (const sensorRow of sensorRows) {
+      sensors.push(await buildSensorPayload(sensorRow));
     }
 
     res.json({ success: true, village, sensors, count: sensors.length });
@@ -1562,28 +1614,24 @@ app.post('/api/sensors/map', async (req, res) => {
     await conn.beginTransaction();
 
     try {
-      // Get villager ID
-      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
+      const villager = await fetchVillagerByPhone(phone, conn);
       if (!villager) throw new Error('Villager not found with this phone number');
 
-      // Get sensor ID
-      const [[sensor]] = await conn.query(`SELECT id FROM sensors WHERE devEUI = ?`, [devEUI]);
-      if (!sensor) throw new Error('Sensor not found with this devEUI');
-
-      // Check if already mapped
-      const [[existing]] = await conn.query(
-        `SELECT id FROM villager_sensors WHERE sensor_id = ?`,
-        [sensor.id]
+      const [[sensor]] = await conn.query(
+        `SELECT id, villager_id FROM sensors WHERE id = ?`,
+        [devEUI]
       );
-      
-      if (existing) {
+      if (!sensor) throw new Error('Sensor not found with this id');
+
+      if (sensor.villager_id !== null) {
         throw new Error('Sensor is already mapped to another villager');
       }
 
-      // Map sensor to villager with phone number
       await conn.query(
-        `INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, ?, ?)`,
-        [villager.id, sensor.id, phone]
+        `UPDATE sensors
+         SET villager_id = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [villager.id, sensor.id]
       );
       
       await conn.commit();
@@ -1632,7 +1680,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
 
     const [sensorInfo] = await db.query(
-      'SELECT type FROM sensors WHERE devEUI = ?',
+      'SELECT type FROM sensors WHERE id = ?',
       [devEUI]
     );
     const sensorType = sensorInfo.length > 0 ? sensorInfo[0].type : 'temperature';
@@ -1719,25 +1767,29 @@ app.get('/api/all-district-stats', async (req, res) => {
   try {
     console.log('📍 Fetching statistics for all districts');
     
-    // Get all districts that have sensors
     const [districtRows] = await db.query(
-      `SELECT DISTINCT district FROM sensors WHERE district IS NOT NULL AND district != '' ORDER BY district`
+      `SELECT DISTINCT name
+       FROM locations
+       WHERE type = 'district'
+       ORDER BY name`
     );
     
-    const allDistricts = districtRows.map(row => row.district);
+    const allDistricts = districtRows.map(row => row.name);
     console.log(`📊 Found ${allDistricts.length} districts:`, allDistricts);
     
     const allStats = {};
     
     for (const district of allDistricts) {
-      // Get all unmapped sensors in this district
       const [sensorRows] = await db.query(
-        `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-         FROM sensors s
-         LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-         WHERE s.district = ? AND vs.id IS NULL
-         ORDER BY s.type ASC`,
-        [district]
+        `${SENSOR_WITH_LOCATION_SQL}
+         WHERE s.villager_id IS NULL
+           AND (
+             d.name = ?
+             OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
+             OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
+           )
+         ORDER BY s.type ASC, s.name ASC`,
+        [district, district, district]
       );
       
       // Group sensors by type
@@ -1749,7 +1801,7 @@ app.get('/api/all-district-stats', async (req, res) => {
       };
       
       for (const sensor of sensorRows) {
-        const sensorType = sensor.type;
+        const sensorType = sensor.sensor_type;
         if (sensorsByType[sensorType]) {
           sensorsByType[sensorType].push(sensor);
         }
@@ -1764,26 +1816,12 @@ app.get('/api/all-district-stats', async (req, res) => {
         let validCount = 0;
         
         // Fetch values for all sensors of this type in parallel
-        const promises = sensors.map(async (sensor) => {
-          const dataQuery = `
-            from(bucket: "${INFLUX_CONFIG.bucket}")
-              |> range(start: -5m)
-              |> filter(fn: (r) => r._measurement == "sensor_data")
-              |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-              |> last()
-          `;
-          const data = await queryInfluxDB(dataQuery);
-          
-          if (data.length > 0) {
-            let value = null;
-            if (data[0][type] !== undefined && typeof data[0][type] === 'number') {
-              value = data[0][type];
-            } else if (data[0]._value !== undefined && typeof data[0]._value === 'number') {
-              value = data[0]._value;
-            }
-            return value;
-          }
-          return null;
+        const promises = sensors.map(async sensor => {
+          const snapshot = await fetchLatestSensorSnapshot(
+            sensor.sensor_id,
+            sensor.sensor_type
+          );
+          return extractNumericValue(snapshot.measurement);
         });
         
         const values = await Promise.all(promises);
