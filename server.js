@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { InfluxDB, Point } = require('@influxdata/influxdb-client');
+const { InfluxDB } = require('@influxdata/influxdb-client');
 const path = require('path');
 const app = express();
 
@@ -19,7 +19,6 @@ const PORT = process.env.PORT || 8181;
 
 // Initialize InfluxDB clients
 const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.token });
-const writeApi = influxDB.getWriteApi(INFLUX_CONFIG.org, INFLUX_CONFIG.bucket);
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
 // MySQL Configuration
@@ -65,12 +64,6 @@ if (process.env.MYSQL_URL) {
         setting_value TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
-    `);
-    
-    await db.query(`
-      INSERT INTO system_settings (setting_key, setting_value) 
-      VALUES ('mock_data_enabled', 'false')
-      ON DUPLICATE KEY UPDATE setting_key = setting_key
     `);
     
     try {
@@ -214,10 +207,28 @@ async function fetchVillagerByPhone(phone, conn = db) {
   return normalizeVillager(rows[0]);
 }
 
+function getUnitForType(type) {
+  const units = {
+    'temperature': '°C',
+    'humidity': '%',
+    'pressure': 'hPa',
+    'water_level': '%',
+    'water_quality': 'pH',
+    'air_quality': 'AQI',
+    'ph': 'pH',
+    'gas': 'ppm',
+    'turbidity': 'NTU',
+    'chlorine': 'mg/L',
+    'water': 'L',
+    'air': 'μg/m³'
+  };
+  return units[type] || '';
+}
+
 async function fetchLatestSensorSnapshot(sensorId, sensorType) {
   const dataQuery = `
     from(bucket: "${INFLUX_CONFIG.bucket}")
-      |> range(start: -5m)
+      |> range(start: -1h)
       |> filter(fn: (r) => r._measurement == "sensor_data")
       |> filter(fn: (r) => r.devEUI == "${sensorId}")
       |> last()
@@ -228,22 +239,56 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType) {
   let measurement = 'No data';
   let time = '';
   let status = 'Offline';
+  let numericValue = null;
 
-  if (data.length > 0) {
-    if (data[0][sensorType] !== undefined) {
-      measurement = `${sensorType}: ${data[0][sensorType]}`;
-    } else {
-      measurement =
-        data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
-    }
-
-    const readingTime = new Date(data[0]._time);
+  if (data && data.length > 0) {
+    const point = data[0];
+    const readingTime = new Date(point._time);
     time = readingTime.toLocaleString();
     const diffSeconds = (Date.now() - readingTime.getTime()) / 1000;
     status = diffSeconds <= 22 ? 'Live' : 'Offline';
+    
+    // Try different methods to extract value
+    let value = null;
+    
+    // Method 1: Direct field match
+    if (point[sensorType] !== undefined) {
+      value = point[sensorType];
+    }
+    // Method 2: Check common field names
+    else if (point.value !== undefined) {
+      value = point.value;
+    }
+    // Method 3: Check _value field
+    else if (point._value !== undefined) {
+      value = point._value;
+    }
+    // Method 4: Search for any numeric field
+    else {
+      for (let key in point) {
+        if (!key.startsWith('_') && typeof point[key] === 'number') {
+          value = point[key];
+          break;
+        }
+      }
+    }
+    
+    if (value !== null && value !== undefined) {
+      const numValue = typeof value === 'number' ? value : parseFloat(value);
+      if (!isNaN(numValue)) {
+        numericValue = numValue;
+        const unit = getUnitForType(sensorType);
+        measurement = `${sensorType}: ${numValue.toFixed(2)} ${unit}`;
+      }
+    }
+    
+    // Use measurement field if available
+    if (measurement === 'No data' && point.measurement) {
+      measurement = point.measurement;
+    }
   }
 
-  return { measurement, time, status };
+  return { measurement, time, status, numericValue };
 }
 
 async function buildSensorPayload(row, { includeAssignment = true } = {}) {
@@ -265,243 +310,6 @@ async function buildSensorPayload(row, { includeAssignment = true } = {}) {
     ...(includeAssignment ? { isAssigned: row.villager_id !== null } : {})
   };
 }
-
-function extractNumericValue(input) {
-  if (typeof input === 'number' && !Number.isNaN(input)) {
-    return input;
-  }
-
-  if (input === null || input === undefined) {
-    return null;
-  }
-
-  const match = String(input).match(/[-+]?\d*\.?\d+/);
-  if (!match) {
-    return null;
-  }
-
-  const parsed = parseFloat(match[0]);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-// ==================== MOCK DATA GENERATOR ====================
-
-const MOCK_CONFIG = {
-  enabled: false,
-  interval: 7000,
-  timer: null
-};
-
-function getRandomValueForType(type, sensorName) {
-  const name = sensorName.toLowerCase();
-  
-  switch(type) {
-      case 'temperature': return (20 + Math.random() * 15).toFixed(1);
-      case 'humidity': return Math.floor(40 + Math.random() * 50).toString();
-      case 'pressure': return Math.floor(980 + Math.random() * 40).toString();
-      case 'water_level': return (30 + Math.random() * 70).toFixed(1);
-      case 'water_quality': return (6.5 + Math.random() * 2).toFixed(1);
-      case 'air_quality': return Math.floor(50 + Math.random() * 150).toString();
-      case 'ph': return (6.5 + Math.random() * 2).toFixed(1);
-      case 'gas': return Math.floor(10 + Math.random() * 90).toString();
-      case 'turbidity': return (1 + Math.random() * 99).toFixed(1);
-      case 'chlorine': return (0.5 + Math.random() * 1.5).toFixed(2);
-      default:
-          if (name.includes('temperature')) return (20 + Math.random() * 15).toFixed(1);
-          if (name.includes('humidity')) return Math.floor(40 + Math.random() * 50).toString();
-          if (name.includes('water') && name.includes('level')) return (30 + Math.random() * 70).toFixed(1);
-          if (name.includes('water') && name.includes('quality')) return (6.5 + Math.random() * 2).toFixed(1);
-          if (name.includes('pressure')) return Math.floor(980 + Math.random() * 40).toString();
-          if (name.includes('air') && name.includes('quality')) return Math.floor(50 + Math.random() * 150).toString();
-          if (name.includes('ph')) return (6.5 + Math.random() * 2).toFixed(1);
-          return (10 + Math.random() * 90).toFixed(1);
-  }
-}
-
-function getUnitForType(type, sensorName) {
-  const name = sensorName.toLowerCase();
-  
-  switch(type) {
-      case 'temperature': return '°C';
-      case 'humidity': return '%';
-      case 'pressure': return 'hPa';
-      case 'water_level': return '%';
-      case 'water_quality': return 'pH';
-      case 'air_quality': return 'AQI';
-      case 'ph': return 'pH';
-      case 'gas': return 'ppm';
-      case 'turbidity': return 'NTU';
-      case 'chlorine': return 'mg/L';
-      default:
-          if (name.includes('temperature')) return '°C';
-          if (name.includes('humidity')) return '%';
-          if (name.includes('water') && name.includes('level')) return '%';
-          if (name.includes('water') && name.includes('quality')) return 'pH';
-          if (name.includes('pressure')) return 'hPa';
-          if (name.includes('air') && name.includes('quality')) return 'AQI';
-          if (name.includes('ph')) return 'pH';
-          return '';
-  }
-}
-
-async function generateMockData() {
-  try {
-    const [sensors] = await db.query(
-      'SELECT devEUI, name, type FROM sensors ORDER BY id DESC'
-    );
-    
-    if (sensors.length === 0) {
-      console.log('⚠️ No sensors found to generate mock data');
-      return;
-    }
-    
-    console.log(`🎲 Generating mock data for ${sensors.length} sensors at ${new Date().toLocaleTimeString()}...`);
-    let generatedCount = 0;
-    
-    for (const sensor of sensors) {
-      const value = parseFloat(getRandomValueForType(sensor.type, sensor.name));
-      const unit = getUnitForType(sensor.type, sensor.name);
-      
-      let fieldName = sensor.type;
-      if (fieldName === 'water_level') fieldName = 'water_level';
-      if (fieldName === 'water_quality') fieldName = 'water_quality';
-      if (fieldName === 'air_quality') fieldName = 'air_quality';
-      
-      const point = new Point('sensor_data')
-        .tag('devEUI', sensor.devEUI)
-        .floatField(fieldName, value);
-      
-      writeApi.writePoint(point);
-      await writeApi.flush();
-      
-      console.log(`   ✓ ${sensor.name} (${sensor.type}): ${value} ${unit}`);
-      generatedCount++;
-    }
-    
-    if (generatedCount > 0) {
-      console.log(`✅ Mock data generated successfully for ${generatedCount} sensors`);
-    }
-    
-  } catch (error) {
-    console.error('❌ Mock data generation error:', error);
-  }
-}
-
-app.get('/api/debug/raw-sensor-data/:devEUI', async (req, res) => {
-  try {
-    const { devEUI } = req.params;
-    
-    const fluxQuery = `
-      from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: -1h)
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        |> filter(fn: (r) => r.devEUI == "${devEUI}")
-        |> sort(columns: ["_time"], desc: true)
-        |> limit(n: 20)
-    `;
-    
-    const rows = await queryInfluxDB(fluxQuery);
-    
-    res.json({
-      success: true,
-      devEUI: devEUI,
-      count: rows.length,
-      data: rows
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-async function generateHistoricalData() {
-  try {
-    const [sensors] = await db.query('SELECT devEUI, name, type FROM sensors');
-    if (sensors.length === 0) return;
-    
-    console.log('📊 Generating historical data for past 24 hours...');
-    
-    for (const sensor of sensors) {
-      for (let hour = 1; hour <= 24; hour++) {
-        const timestamp = new Date(Date.now() - hour * 3600000);
-        const value = getRandomValueForType(sensor.type, sensor.name);
-        const unit = getUnitForType(sensor.type, sensor.name);
-        
-        let fieldName = sensor.type;
-        const measurementString = `${fieldName}: ${value} ${unit}`.trim();
-        
-        const point = new Point('sensor_data')
-          .tag('devEUI', sensor.devEUI)
-          .floatField(fieldName, parseFloat(value))
-          .stringField('measurement', measurementString)
-          .timestamp(timestamp);
-        
-        writeApi.writePoint(point);
-      }
-      await writeApi.flush();
-      console.log(`   ✓ Historical data generated for ${sensor.name}`);
-    }
-    console.log('✅ Historical data generation complete!');
-  } catch (error) {
-    console.error('❌ Error generating historical data:', error);
-  }
-}
-
-async function startMockDataGenerator() {
-  try {
-      const [rows] = await db.query(
-          "SELECT setting_value FROM system_settings WHERE setting_key = 'mock_data_enabled'"
-      );
-      
-      if (rows.length > 0) {
-          MOCK_CONFIG.enabled = rows[0].setting_value === 'true';
-      }
-      
-      if (MOCK_CONFIG.enabled && !MOCK_CONFIG.timer) {
-          console.log('🎲 Starting mock data generator (every 7 seconds)...');
-          await generateMockData();
-          MOCK_CONFIG.timer = setInterval(generateMockData, MOCK_CONFIG.interval);
-      } else if (!MOCK_CONFIG.enabled && MOCK_CONFIG.timer) {
-          console.log('🛑 Stopping mock data generator...');
-          clearInterval(MOCK_CONFIG.timer);
-          MOCK_CONFIG.timer = null;
-      }
-  } catch (error) {
-      console.error('❌ Error checking mock data status:', error);
-  }
-}
-
-async function toggleMockData(enabled) {
-    try {
-        await db.query(
-            "UPDATE system_settings SET setting_value = ? WHERE setting_key = 'mock_data_enabled'",
-            [enabled ? 'true' : 'false']
-        );
-        MOCK_CONFIG.enabled = enabled;
-        await startMockDataGenerator();
-        return { success: true, enabled: MOCK_CONFIG.enabled };
-    } catch (error) {
-        console.error('❌ Error toggling mock data:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-async function getMockDataStatus() {
-    try {
-        const [rows] = await db.query(
-            "SELECT setting_value FROM system_settings WHERE setting_key = 'mock_data_enabled'"
-        );
-        return {
-            enabled: rows.length > 0 ? rows[0].setting_value === 'true' : false,
-            interval: MOCK_CONFIG.interval / 1000
-        };
-    } catch (error) {
-        return { enabled: false, interval: 7 };
-    }
-}
-
-setTimeout(() => {
-    startMockDataGenerator();
-}, 5000);
 
 // ==================== MIDDLEWARE ====================
 
@@ -534,7 +342,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // ==================== HELPER FUNCTIONS ====================
 
 async function queryInfluxDB(fluxQuery) {
@@ -544,32 +351,6 @@ async function queryInfluxDB(fluxQuery) {
   } catch (error) {
     console.error('❌ InfluxDB query error:', error.message);
     return [];
-  }
-}
-
-async function writeToInfluxDB(measurement, tags, fields) {
-  try {
-    const point = new Point(measurement);
-
-    Object.entries(tags).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) {
-        point.tag(key, value.toString());
-      }
-    });
-
-    Object.entries(fields).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) {
-        point.stringField(key, value.toString());
-      }
-    });
-
-    writeApi.writePoint(point);
-    await writeApi.flush();
-    console.log(`✅ Written to InfluxDB: ${measurement}`);
-    return true;
-  } catch (error) {
-    console.error('❌ InfluxDB write error:', error.message);
-    return false;
   }
 }
 
@@ -592,20 +373,6 @@ async function getActiveSensorCount() {
     const diffSeconds = (now - new Date(r._time).getTime()) / 1000;
     return diffSeconds <= SENSOR_ACTIVE_THRESHOLD;
   }).length;
-}
-
-async function getActiveSensors() {
-  const query = `
-    from(bucket: "${INFLUX_CONFIG.bucket}")
-      |> range(start: -5m)
-      |> filter(fn: (r) => r._measurement == "sensor_data")
-      |> keep(columns: ["devEUI"])
-      |> group(columns: ["devEUI"])
-  `;
-
-  const rows = await queryInfluxDB(query);
-  const unique = new Set(rows.map(r => r.devEUI));
-  return Array.from(unique);
 }
 
 function determineSensorType(name) {
@@ -656,47 +423,6 @@ app.get('/api/health', async (req, res) => {
       message: error.message
     });
   }
-});
-
-// ==================== MOCK DATA CONTROL ENDPOINTS ====================
-
-app.get('/api/admin/mock-status', async (req, res) => {
-    try {
-        const status = await getMockDataStatus();
-        res.json({
-            success: true,
-            ...status
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.post('/api/admin/mock-enable', async (req, res) => {
-    try {
-        const result = await toggleMockData(true);
-        res.json(result);
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.post('/api/admin/mock-disable', async (req, res) => {
-    try {
-        const result = await toggleMockData(false);
-        res.json(result);
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.post('/api/admin/mock-generate', async (req, res) => {
-    try {
-        await generateMockData();
-        res.json({ success: true, message: 'Mock data generated' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
 });
 
 // ==================== VILLAGER MANAGEMENT ====================
@@ -819,27 +545,8 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
     const result = [];
 
     for (const sensor of sensors) {
-      const flux = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-          |> last()
-      `;
-
-      const data = await queryInfluxDB(flux);
-
-      let measurement = 'No data';
-      let time = '';
-      let status = 'Offline';
-
-      if (data.length > 0) {
-        measurement = data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
-        const t = new Date(data[0]._time);
-        time = t.toLocaleString();
-        status = (Date.now() - t.getTime()) / 1000 <= 22 ? 'Live' : 'Offline';
-      }
-
+      const snapshot = await fetchLatestSensorSnapshot(sensor.devEUI, sensor.type);
+      
       result.push({
         devEUI: sensor.devEUI,
         name: sensor.name,
@@ -848,9 +555,9 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
         panchayat: sensor.panchayat,
         district: sensor.district,
         state: sensor.state,
-        measurement,
-        time,
-        status
+        measurement: snapshot.measurement,
+        time: snapshot.time,
+        status: snapshot.status
       });
     }
 
@@ -862,9 +569,8 @@ app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
 });
 
 // ==================== SENSOR MANAGEMENT ====================
-// IMPORTANT: Specific routes FIRST, then parameter routes
 
-// 1. SPECIFIC ROUTE: Get sensors by district
+// Get sensors by district
 app.get('/api/sensors/by-district', async (req, res) => {
   try {
     const { district } = req.query;
@@ -907,13 +613,12 @@ app.get('/api/sensors/by-district', async (req, res) => {
     console.error('❌ Error fetching sensors by district:', err);
     res.status(500).json({
       success: false,
-      error: err.message,
-      stack: err.stack
+      error: err.message
     });
   }
 });
 
-// 2. SPECIFIC ROUTE: Get district statistics
+// Get district statistics
 app.get('/api/district-stats/:district', async (req, res) => {
   try {
     const { district } = req.params;
@@ -925,8 +630,8 @@ app.get('/api/district-stats/:district', async (req, res) => {
        WHERE s.villager_id IS NULL
          AND (
            d.name = ?
-           OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
-           OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
+           OR (d.id IS NULL AND parent.type = 'district' && parent.name = ?)
+           OR (d.id IS NULL AND grandparent.type = 'district' && grandparent.name = ?)
          )
        ORDER BY s.type ASC, s.name ASC`,
       [district, district, district]
@@ -935,25 +640,19 @@ app.get('/api/district-stats/:district', async (req, res) => {
     console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
     
     // Group sensors by type
-    const sensorsByType = {
-      temperature: [],
-      humidity: [],
-      water_quality: [],
-      air_quality: []
-    };
+    const sensorsByType = {};
     
     for (const sensor of sensorRows) {
       const sensorType = sensor.sensor_type;
-      if (sensorsByType[sensorType]) {
-        sensorsByType[sensorType].push(sensor);
+      if (!sensorsByType[sensorType]) {
+        sensorsByType[sensorType] = [];
       }
+      sensorsByType[sensorType].push(sensor);
     }
     
     const stats = {};
     
     for (const [type, sensors] of Object.entries(sensorsByType)) {
-      if (sensors.length === 0) continue;
-      
       let total = 0;
       let validCount = 0;
       const sensorValues = [];
@@ -964,15 +663,15 @@ app.get('/api/district-stats/:district', async (req, res) => {
             sensor.sensor_id,
             sensor.sensor_type
           );
-          const value = extractNumericValue(snapshot.measurement);
+          const value = snapshot.numericValue;
 
-          if (value !== null && value > 0) {
+          if (value !== null && !isNaN(value) && value > 0) {
             total += value;
             validCount++;
             sensorValues.push({
               name: sensor.sensor_name,
               village: normalizeSensorLocation(sensor).village,
-              value
+              value: value
             });
           }
         } catch (err) {
@@ -986,7 +685,7 @@ app.get('/api/district-stats/:district', async (req, res) => {
           count: validCount,
           totalSensors: sensors.length,
           average: average,
-          unit: _getUnitForType(type),
+          unit: getUnitForType(type),
           sensors: sensorValues,
           lastUpdated: new Date().toISOString()
         };
@@ -995,7 +694,7 @@ app.get('/api/district-stats/:district', async (req, res) => {
           count: 0,
           totalSensors: sensors.length,
           average: null,
-          unit: _getUnitForType(type),
+          unit: getUnitForType(type),
           sensors: [],
           lastUpdated: null
         };
@@ -1015,23 +714,12 @@ app.get('/api/district-stats/:district', async (req, res) => {
     console.error('❌ Error fetching district statistics:', err);
     res.status(500).json({
       success: false,
-      error: err.message,
-      stack: err.stack
+      error: err.message
     });
   }
 });
 
-function _getUnitForType(type) {
-  switch(type) {
-    case 'temperature': return '°C';
-    case 'humidity': return '%';
-    case 'water_quality': return 'pH';
-    case 'air_quality': return 'AQI';
-    default: return '';
-  }
-}
-
-// 3. PARAMETER ROUTE: Get single sensor
+// Get single sensor
 app.get('/api/sensors/:devEUI', async (req, res) => {
   try {
     const { devEUI } = req.params;
@@ -1054,7 +742,7 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// 4. GENERAL ROUTE: Get all sensors
+// Get all sensors
 app.get('/api/sensors', async (req, res) => {
   try {
     const [sensorRows] = await db.query(
@@ -1065,42 +753,19 @@ app.get('/api/sensors', async (req, res) => {
     const sensors = [];
 
     for (const sensor of sensorRows) {
-      const { devEUI, name, type, village, panchayat, district, state } = sensor;
-
-      const dataQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${devEUI}")
-          |> last()
-      `;
-
-      const data = await queryInfluxDB(dataQuery);
-
-      let latestValue = 'No data';
-      let latestTime = '';
-      let status = 'Offline';
-
-      if (data.length > 0) {
-        latestValue = data[0].measurement || `${data[0]._field}: ${data[0]._value}`;
-        const t = new Date(data[0]._time);
-        latestTime = t.toLocaleString();
-        const now = new Date();
-        const diffSeconds = (now - t) / 1000;
-        status = diffSeconds <= 22 ? 'Live' : 'Offline';
-      }
-
+      const snapshot = await fetchLatestSensorSnapshot(sensor.devEUI, sensor.type);
+      
       sensors.push({
-        devEUI,
-        name,
-        type,
-        village,
-        panchayat,
-        district,
-        state,
-        measurement: latestValue,
-        time: latestTime,
-        status
+        devEUI: sensor.devEUI,
+        name: sensor.name,
+        type: sensor.type,
+        village: sensor.village,
+        panchayat: sensor.panchayat,
+        district: sensor.district,
+        state: sensor.state,
+        measurement: snapshot.measurement,
+        time: snapshot.time,
+        status: snapshot.status
       });
     }
 
@@ -1111,7 +776,7 @@ app.get('/api/sensors', async (req, res) => {
   }
 });
 
-// 5. Add new sensor
+// Add new sensor
 app.post('/api/sensors', async (req, res) => {
   const { devEUI, deviceName, type, village, panchayat, district, state, phone } = req.body;
 
@@ -1136,7 +801,7 @@ app.post('/api/sensors', async (req, res) => {
     if (phone) {
       const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
       if (!villager) throw new Error('No villager found with this phone number');
-      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, ?, ?)`, [villager.id, sensorId, phone]);
+      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id) VALUES (?, ?)`, [villager.id, sensorId]);
     }
 
     await conn.commit();
@@ -1152,7 +817,7 @@ app.post('/api/sensors', async (req, res) => {
   }
 });
 
-// 6. Update sensor
+// Update sensor
 app.put('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
   const { deviceName, type, village, panchayat, district, state, phone } = req.body;
@@ -1173,7 +838,7 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
     if (phone) {
       const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
       if (!villager) throw new Error('Villager not found');
-      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id, phone) VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?), ?)`, [villager.id, devEUI, phone]);
+      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id) VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?))`, [villager.id, devEUI]);
     }
 
     await conn.commit();
@@ -1186,7 +851,7 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// 7. Delete sensor
+// Delete sensor
 app.delete('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
 
@@ -1212,6 +877,106 @@ app.delete('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
+// ==================== SENSOR HISTORY ENDPOINT ====================
+
+app.get('/api/sensors/:devEUI/history', async (req, res) => {
+  try {
+    const { devEUI } = req.params;
+    const { range } = req.query;
+    let rangeValue = range ? range : '-24h';
+
+    console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
+
+    // Get sensor type from database
+    const [sensorInfo] = await db.query(
+      'SELECT type FROM sensors WHERE id = ?',
+      [devEUI]
+    );
+    
+    if (sensorInfo.length === 0) {
+      return res.status(404).json({ success: false, error: 'Sensor not found' });
+    }
+    
+    const sensorType = sensorInfo[0].type;
+
+    // Query to get data points
+    const fluxQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: ${rangeValue})
+        |> filter(fn: (r) => r._measurement == "sensor_data")
+        |> filter(fn: (r) => r.devEUI == "${devEUI}")
+        |> sort(columns: ["_time"], desc: false)
+    `;
+
+    const rows = await queryInfluxDB(fluxQuery);
+    
+    console.log(`📊 Found ${rows.length} raw records for sensor ${devEUI}`);
+    
+    if (rows.length === 0) {
+      return res.json({ success: true, history: [], count: 0, message: 'No data found for this sensor' });
+    }
+
+    const history = [];
+    
+    for (const row of rows) {
+      let value = null;
+      let timestamp = row._time;
+      
+      // Try multiple approaches to extract value
+      // Approach 1: Direct field match by sensor type
+      if (row[sensorType] !== undefined) {
+        value = typeof row[sensorType] === 'number' ? row[sensorType] : parseFloat(row[sensorType]);
+      }
+      // Approach 2: Check for value field
+      else if (row.value !== undefined) {
+        value = typeof row.value === 'number' ? row.value : parseFloat(row.value);
+      }
+      // Approach 3: Using _value field
+      else if (row._value !== undefined) {
+        value = typeof row._value === 'number' ? row._value : parseFloat(row._value);
+      }
+      // Approach 4: Search for any numeric field
+      else {
+        for (let key in row) {
+          if (!key.startsWith('_') && typeof row[key] === 'number' && key !== 'devEUI') {
+            value = row[key];
+            break;
+          }
+        }
+      }
+      
+      // Validate the value
+      if (value !== null && !isNaN(value) && isFinite(value) && value > -1000) {
+        history.push({
+          time: timestamp,
+          value: value,
+          field: sensorType
+        });
+      }
+    }
+
+    console.log(`✅ Returning ${history.length} valid numeric data points for sensor ${devEUI}`);
+    if (history.length > 0) {
+      console.log(`📊 Value range: ${Math.min(...history.map(h => h.value))} to ${Math.max(...history.map(h => h.value))}`);
+    }
+
+    res.json({
+      success: true,
+      history: history,
+      count: history.length,
+      sensorType: sensorType,
+      unit: getUnitForType(sensorType)
+    });
+
+  } catch (err) {
+    console.error('❌ Error fetching sensor history:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
 // ==================== DISTRICT ENDPOINTS ====================
 
 app.get('/api/districts', async (req, res) => {
@@ -1227,6 +992,106 @@ app.get('/api/districts', async (req, res) => {
   } catch (err) {
     console.error('❌ Error fetching districts:', err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get statistics for all districts at once
+app.get('/api/all-district-stats', async (req, res) => {
+  try {
+    console.log('📍 Fetching statistics for all districts');
+    
+    const [districtRows] = await db.query(
+      `SELECT DISTINCT name
+       FROM locations
+       WHERE type = 'district'
+       ORDER BY name`
+    );
+    
+    const allDistricts = districtRows.map(row => row.name);
+    console.log(`📊 Found ${allDistricts.length} districts`);
+    
+    const allStats = {};
+    
+    for (const district of allDistricts) {
+      const [sensorRows] = await db.query(
+        `${SENSOR_WITH_LOCATION_SQL}
+         WHERE s.villager_id IS NULL
+           AND (
+             d.name = ?
+             OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
+             OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
+           )
+         ORDER BY s.type ASC, s.name ASC`,
+        [district, district, district]
+      );
+      
+      // Group sensors by type
+      const sensorsByType = {};
+      
+      for (const sensor of sensorRows) {
+        const sensorType = sensor.sensor_type;
+        if (!sensorsByType[sensorType]) {
+          sensorsByType[sensorType] = [];
+        }
+        sensorsByType[sensorType].push(sensor);
+      }
+      
+      const districtStats = {};
+      
+      for (const [type, sensors] of Object.entries(sensorsByType)) {
+        let total = 0;
+        let validCount = 0;
+        
+        // Fetch values for all sensors of this type
+        const promises = sensors.map(async sensor => {
+          const snapshot = await fetchLatestSensorSnapshot(
+            sensor.sensor_id,
+            sensor.sensor_type
+          );
+          return snapshot.numericValue;
+        });
+        
+        const values = await Promise.all(promises);
+        
+        for (const value of values) {
+          if (value !== null && !isNaN(value) && value > 0) {
+            total += value;
+            validCount++;
+          }
+        }
+        
+        if (validCount > 0) {
+          districtStats[type] = {
+            count: validCount,
+            totalSensors: sensors.length,
+            average: total / validCount,
+            unit: getUnitForType(type),
+          };
+        } else {
+          districtStats[type] = {
+            count: 0,
+            totalSensors: sensors.length,
+            average: null,
+            unit: getUnitForType(type),
+          };
+        }
+      }
+      
+      allStats[district] = districtStats;
+    }
+    
+    res.json({
+      success: true,
+      stats: allStats,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (err) {
+    console.error('❌ Error fetching all district stats:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
@@ -1286,24 +1151,12 @@ app.get('/api/admin/dashboard', async (req, res) => {
     );
 
     const [sensorRows] = await db.query(
-      `SELECT devEUI, name, type, village, panchayat, district, state FROM sensors ORDER BY installed_at DESC LIMIT 5`
+      `SELECT id, devEUI, name, type, village, panchayat, district, state FROM sensors ORDER BY installed_at DESC LIMIT 5`
     );
 
     const recentSensors = [];
     for (const sensor of sensorRows) {
-      const flux = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-          |> last()
-      `;
-      const data = await queryInfluxDB(flux);
-      let status = 'Offline';
-      if (data.length > 0) {
-        const t = new Date(data[0]._time);
-        status = (Date.now() - t.getTime()) / 1000 <= 22 ? 'Live' : 'Offline';
-      }
+      const snapshot = await fetchLatestSensorSnapshot(sensor.devEUI, sensor.type);
       recentSensors.push({
         devEUI: sensor.devEUI,
         name: sensor.name,
@@ -1312,7 +1165,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
         panchayat: sensor.panchayat,
         district: sensor.district,
         state: sensor.state,
-        status
+        status: snapshot.status
       });
     }
 
@@ -1476,86 +1329,58 @@ app.get('/api/auth/validate', async (req, res) => {
 
 // ==================== DEBUG ENDPOINTS ====================
 
-app.get('/api/debug/raw', async (req, res) => {
-  try {
-    const query = `from(bucket: "${INFLUX_CONFIG.bucket}") |> range(start: -1h) |> filter(fn: (r) => true) |> limit(n: 50)`;
-    const result = await queryInfluxDB(query);
-    res.json({ success: true, data: result, count: result.length });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/debug/latest-sensor-data', async (req, res) => {
-  try {
-    const [sensors] = await db.query('SELECT devEUI, name FROM sensors');
-    const results = [];
-    for (const sensor of sensors) {
-      const fluxQuery = `
-        from(bucket: "${INFLUX_CONFIG.bucket}")
-          |> range(start: -5m)
-          |> filter(fn: (r) => r._measurement == "sensor_data")
-          |> filter(fn: (r) => r.devEUI == "${sensor.devEUI}")
-          |> last()
-      `;
-      const data = await queryInfluxDB(fluxQuery);
-      results.push({
-        devEUI: sensor.devEUI,
-        name: sensor.name,
-        hasData: data.length > 0,
-        latestData: data.length > 0 ? { time: data[0]._time, measurement: data[0].measurement } : null
-      });
-    }
-    res.json({ success: true, data: results });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/debug/sensor-history/:devEUI', async (req, res) => {
+app.get('/api/debug/influx-check/:devEUI', async (req, res) => {
   try {
     const { devEUI } = req.params;
-    const { range } = req.query;
-    const rangeValue = range || '-1h';
+    
+    const [sensorInfo] = await db.query(
+      'SELECT id, name, type FROM sensors WHERE id = ?',
+      [devEUI]
+    );
+    
+    if (sensorInfo.length === 0) {
+      return res.status(404).json({ success: false, error: 'Sensor not found' });
+    }
     
     const fluxQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: ${rangeValue})
+        |> range(start: -1h)
         |> filter(fn: (r) => r._measurement == "sensor_data")
         |> filter(fn: (r) => r.devEUI == "${devEUI}")
-        |> sort(columns: ["_time"], desc: false)
+        |> sort(columns: ["_time"], desc: true)
+        |> limit(n: 10)
     `;
     
-    const result = await queryInfluxDB(fluxQuery);
+    const data = await queryInfluxDB(fluxQuery);
+    
+    const availableFields = new Set();
+    const sampleData = [];
+    
+    for (const row of data) {
+      const fields = Object.keys(row).filter(k => 
+        !k.startsWith('_') && k !== 'devEUI' && k !== 'result' && k !== 'table'
+      );
+      fields.forEach(f => availableFields.add(f));
+      
+      sampleData.push({
+        time: row._time,
+        fields: fields,
+        data: row
+      });
+    }
     
     res.json({
       success: true,
-      devEUI: devEUI,
-      range: rangeValue,
-      count: result.length,
-      data: result
+      sensor: sensorInfo[0],
+      hasData: data.length > 0,
+      dataCount: data.length,
+      availableFields: Array.from(availableFields),
+      sampleData: sampleData.slice(0, 5),
+      expectedType: sensorInfo[0].type
     });
+    
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/debug/mysql-tables', async (req, res) => {
-  try {
-    const [tables] = await db.query('SHOW TABLES');
-    res.json({ success: true, tables });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/debug/table/:tableName', async (req, res) => {
-  try {
-    const { tableName } = req.params;
-    const [columns] = await db.query(`DESCRIBE ${tableName}`);
-    res.json({ success: true, table: tableName, columns });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
   }
 });
 
@@ -1567,21 +1392,7 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
     if (!village) return res.status(400).json({ success: false, error: 'Village name is required' });
 
     const searchTerm = `%${String(village).trim().toLowerCase()}%`;
-    const [villageCheck] = await db.query(
-      `${SENSOR_WITH_LOCATION_SQL}
-       WHERE s.villager_id IS NULL
-         AND (
-           LOWER(COALESCE(s.location_description, '')) LIKE ?
-           OR LOWER(COALESCE(p.name, '')) LIKE ?
-         )
-       LIMIT 1`,
-      [searchTerm, searchTerm]
-    );
-
-    if (villageCheck.length === 0) {
-      return res.json({ success: true, village, sensors: [], count: 0, message: `No sensors found in village "${village}"` });
-    }
-
+    
     const [sensorRows] = await db.query(
       `${SENSOR_WITH_LOCATION_SQL}
        WHERE s.villager_id IS NULL
@@ -1649,235 +1460,6 @@ app.post('/api/sensors/map', async (req, res) => {
   }
 });
 
-app.get('/api/debug/villages', async (req, res) => {
-  try {
-    const [villages] = await db.query(`SELECT DISTINCT village FROM sensors WHERE village IS NOT NULL ORDER BY village`);
-    const [sensorCounts] = await db.query(`
-      SELECT s.village, COUNT(*) as total_sensors,
-        SUM(CASE WHEN vs.id IS NULL THEN 1 ELSE 0 END) as unassigned_count,
-        SUM(CASE WHEN vs.id IS NOT NULL THEN 1 ELSE 0 END) as assigned_count
-      FROM sensors s LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-      WHERE s.village IS NOT NULL GROUP BY s.village ORDER BY s.village
-    `);
-    const [unassignedSensors] = await db.query(`
-      SELECT s.devEUI, s.name, s.type, s.village
-      FROM sensors s LEFT JOIN villager_sensors vs ON vs.sensor_id = s.id
-      WHERE vs.id IS NULL ORDER BY s.village
-    `);
-    res.json({ success: true, villages: villages.map(v => v.village), sensorCounts, totalUnassigned: unassignedSensors.length, unassignedSensors });
-  } catch (err) {
-    console.error('❌ Debug endpoint error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/sensors/:devEUI/history', async (req, res) => {
-  try {
-    const { devEUI } = req.params;
-    const { range } = req.query;
-    let rangeValue = range ? range : '-24h';
-
-    console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
-
-    const [sensorInfo] = await db.query(
-      'SELECT type FROM sensors WHERE id = ?',
-      [devEUI]
-    );
-    const sensorType = sensorInfo.length > 0 ? sensorInfo[0].type : 'temperature';
-    
-    console.log(`📊 Sensor type: ${sensorType}`);
-
-    const fluxQuery = `
-      from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: ${rangeValue})
-        |> filter(fn: (r) => r._measurement == "sensor_data")
-        |> filter(fn: (r) => r.devEUI == "${devEUI}")
-        |> sort(columns: ["_time"], desc: false)
-    `;
-
-    const rows = await queryInfluxDB(fluxQuery);
-    
-    console.log(`📊 Found ${rows.length} raw records`);
-    
-    if (rows.length === 0) {
-      return res.json({ success: true, history: [], count: 0 });
-    }
-
-    const history = [];
-    
-    for (const row of rows) {
-      let value = null;
-      
-      if (row._field === sensorType && row._value !== undefined) {
-        value = parseFloat(row._value);
-      }
-      else if (row[sensorType] !== undefined && typeof row[sensorType] === 'number') {
-        value = row[sensorType];
-      }
-      else if (row.value !== undefined && typeof row.value === 'number') {
-        value = row.value;
-      }
-      else if (row.measurement && typeof row.measurement === 'string') {
-        const match = row.measurement.match(/(\d+(?:\.\d+)?)/);
-        if (match) {
-          value = parseFloat(match[1]);
-        }
-      }
-      else if (row[sensorType] !== undefined) {
-        const val = row[sensorType];
-        if (typeof val === 'number') {
-          value = val;
-        } else if (typeof val === 'string') {
-          const num = parseFloat(val);
-          if (!isNaN(num)) value = num;
-        }
-      }
-      
-      if (value !== null && !isNaN(value) && value > 0) {
-        history.push({
-          time: row._time,
-          value: value,
-          field: sensorType
-        });
-      }
-    }
-
-    console.log(`✅ Returning ${history.length} valid numeric data points`);
-    if (history.length > 0) {
-      console.log(`📊 Values: ${history.slice(0, 10).map(h => h.value).join(', ')}...`);
-    }
-
-    res.json({
-      success: true,
-      history: history,
-      count: history.length
-    });
-
-  } catch (err) {
-    console.error('❌ Error fetching sensor history:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// Get statistics for all districts at once
-app.get('/api/all-district-stats', async (req, res) => {
-  try {
-    console.log('📍 Fetching statistics for all districts');
-    
-    const [districtRows] = await db.query(
-      `SELECT DISTINCT name
-       FROM locations
-       WHERE type = 'district'
-       ORDER BY name`
-    );
-    
-    const allDistricts = districtRows.map(row => row.name);
-    console.log(`📊 Found ${allDistricts.length} districts:`, allDistricts);
-    
-    const allStats = {};
-    
-    for (const district of allDistricts) {
-      const [sensorRows] = await db.query(
-        `${SENSOR_WITH_LOCATION_SQL}
-         WHERE s.villager_id IS NULL
-           AND (
-             d.name = ?
-             OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
-             OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
-           )
-         ORDER BY s.type ASC, s.name ASC`,
-        [district, district, district]
-      );
-      
-      // Group sensors by type
-      const sensorsByType = {
-        temperature: [],
-        humidity: [],
-        water_quality: [],
-        air_quality: []
-      };
-      
-      for (const sensor of sensorRows) {
-        const sensorType = sensor.sensor_type;
-        if (sensorsByType[sensorType]) {
-          sensorsByType[sensorType].push(sensor);
-        }
-      }
-      
-      const districtStats = {};
-      
-      for (const [type, sensors] of Object.entries(sensorsByType)) {
-        if (sensors.length === 0) continue;
-        
-        let total = 0;
-        let validCount = 0;
-        
-        // Fetch values for all sensors of this type in parallel
-        const promises = sensors.map(async sensor => {
-          const snapshot = await fetchLatestSensorSnapshot(
-            sensor.sensor_id,
-            sensor.sensor_type
-          );
-          return extractNumericValue(snapshot.measurement);
-        });
-        
-        const values = await Promise.all(promises);
-        
-        for (const value of values) {
-          if (value !== null && value > 0) {
-            total += value;
-            validCount++;
-          }
-        }
-        
-        if (validCount > 0) {
-          districtStats[type] = {
-            count: validCount,
-            totalSensors: sensors.length,
-            average: total / validCount,
-            unit: _getUnitForType(type),
-          };
-        } else {
-          districtStats[type] = {
-            count: 0,
-            totalSensors: sensors.length,
-            average: null,
-            unit: _getUnitForType(type),
-          };
-        }
-      }
-      
-      allStats[district] = districtStats;
-    }
-    
-    res.json({
-      success: true,
-      stats: allStats,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (err) {
-    console.error('❌ Error fetching all district stats:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-function _getUnitForType(type) {
-  switch(type) {
-    case 'temperature': return '°C';
-    case 'humidity': return '%';
-    case 'water_quality': return 'pH';
-    case 'air_quality': return 'AQI';
-    default: return '';
-  }
-}
-
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
@@ -1922,25 +1504,16 @@ app.listen(PORT, () => {
   console.log('   GET  /api/villagers');
   console.log('   GET  /api/sensors');
   console.log('   GET  /api/sensors/by-district?district=Kasaragod');
+  console.log('   GET  /api/sensors/:devEUI/history');
   console.log('   GET  /api/district-stats/:district');
   console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
   console.log('   GET  /api/admin/dashboard');
-  console.log('   GET  /api/admin/mock-status');
-  console.log('   POST /api/admin/mock-enable');
-  console.log('   POST /api/admin/mock-disable');
-  console.log('   POST /api/admin/mock-generate');
   console.log('   GET  /api/districts');
-  console.log('   GET  /api/debug/latest-sensor-data');
-  console.log('   GET  /api/debug/sensor-history/:devEUI');
+  console.log('   GET  /api/debug/influx-check/:devEUI');
   console.log('   POST /api/verify/check-phone');
   console.log('   POST /api/verify/send-otp');
   console.log('   POST /api/verify/check-otp');
-  console.log('   POST /api/verify/resend-otp');
   console.log('   GET  /api/village-sensors/unassigned?village=NAME');
   console.log('   POST /api/sensors/map');
-  console.log('   GET  /api/debug/villages');
   console.log('══════════════════════════════════════════════════════');
-  console.log('🎲 Mock Data Generator: Disabled by default');
-  console.log('   Enable via Admin Dashboard or POST /api/admin/mock-enable');
-  console.log('📊 Sensor types: temperature, humidity, pressure, water_level, etc.');
 });
