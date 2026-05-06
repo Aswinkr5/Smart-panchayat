@@ -99,35 +99,6 @@ const VILLAGER_WITH_LOCATION_SQL = `
   LEFT JOIN locations grandparent ON grandparent.id = parent.parent_id
 `;
 
-const SENSOR_WITH_LOCATION_SQL = `
-  SELECT
-    s.id AS sensor_id,
-    s.name AS sensor_name,
-    s.type AS sensor_type,
-    s.status AS sensor_status,
-    s.location_description,
-    s.villager_id,
-    s.panchayat_id,
-    s.district_id,
-    s.installed_at,
-    s.updated_at,
-    p.name AS panchayat_name,
-    p.state AS panchayat_state,
-    parent.name AS parent_name,
-    parent.type AS parent_type,
-    parent.state AS parent_state,
-    grandparent.name AS grandparent_name,
-    grandparent.type AS grandparent_type,
-    grandparent.state AS grandparent_state,
-    d.name AS district_name,
-    d.state AS district_state
-  FROM sensors s
-  LEFT JOIN locations p ON p.id = s.panchayat_id
-  LEFT JOIN locations parent ON parent.id = p.parent_id
-  LEFT JOIN locations grandparent ON grandparent.id = parent.parent_id
-  LEFT JOIN locations d ON d.id = s.district_id
-`;
-
 function extractVillageLabel(address, fallback = '') {
   if (!address) return fallback;
   const firstPart = String(address)
@@ -170,20 +141,6 @@ function normalizeVillager(row) {
     district,
     state,
     role: 'villager'
-  };
-}
-
-function normalizeSensorLocation(row) {
-  const panchayat = row.panchayat_name || '';
-  const district = resolveDistrictName(row);
-  const state = resolveStateName(row);
-  const village = row.location_description || panchayat || '';
-
-  return {
-    village,
-    panchayat,
-    district,
-    state
   };
 }
 
@@ -276,26 +233,6 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType) {
   }
 
   return { measurement, time, status, numericValue };
-}
-
-async function buildSensorPayload(row, { includeAssignment = true } = {}) {
-  const location = normalizeSensorLocation(row);
-  const latest = await fetchLatestSensorSnapshot(row.sensor_id, row.sensor_type);
-
-  return {
-    id: row.sensor_id,
-    devEUI: row.sensor_id,
-    name: row.sensor_name,
-    type: row.sensor_type,
-    village: location.village,
-    panchayat: location.panchayat,
-    district: location.district,
-    state: location.state,
-    measurement: latest.measurement,
-    time: latest.time,
-    status: latest.status,
-    ...(includeAssignment ? { isAssigned: row.villager_id !== null } : {})
-  };
 }
 
 // ==================== MIDDLEWARE ====================
@@ -444,11 +381,9 @@ app.get('/api/villagers', async (req, res) => {
   try {
     const [rows] = await db.query(
       `SELECT v.id, v.name, v.phone, v.address, v.created_at,
-       p.name as panchayat_name, d.name as district_name, st.name as state_name
+       p.name as panchayat_name
        FROM villagers v
        LEFT JOIN locations p ON p.id = v.panchayat_id
-       LEFT JOIN locations d ON d.id = p.parent_id
-       LEFT JOIN locations st ON st.id = d.parent_id
        ORDER BY v.created_at DESC`
     );
 
@@ -485,6 +420,310 @@ app.post('/api/villagers', async (req, res) => {
   }
 });
 
+// ==================== MOBILE AUTHENTICATION ENDPOINTS ====================
+
+// Check if phone number exists in database
+app.post('/api/verify/check-phone', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    console.log('📱 Checking phone number:', phone);
+    
+    if (!phone || phone.length !== 10) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Please enter valid 10-digit phone number' 
+      });
+    }
+
+    const villager = await fetchVillagerByPhone(phone);
+    
+    if (!villager) {
+      return res.json({ 
+        success: false, 
+        error: 'Phone number not registered in our system' 
+      });
+    }
+
+    console.log('✅ Phone number verified for:', villager.name);
+    res.json({ 
+      success: true, 
+      message: 'Phone number verified', 
+      villager: {
+        name: villager.name,
+        phone: villager.phone,
+        village: villager.village
+      }
+    });
+  } catch (error) {
+    console.error('❌ Phone check error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to check phone number: ' + error.message 
+    });
+  }
+});
+
+// Send OTP (simulated for testing)
+app.post('/api/verify/send-otp', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    console.log('📱 Sending OTP to:', phone);
+    
+    if (!phone || phone.length !== 10) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Please enter valid 10-digit phone number' 
+      });
+    }
+
+    const villager = await fetchVillagerByPhone(phone);
+    if (!villager) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Phone number not registered' 
+      });
+    }
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes expiry
+    
+    // Store OTP in memory
+    otpStore.set(phone, { 
+      otp, 
+      expiresAt, 
+      phone, 
+      villagerId: villager.id, 
+      attempts: 0 
+    });
+
+    console.log(`✅ OTP ${otp} generated for phone ${phone}`);
+    
+    // In production, send SMS here. For testing, return OTP in response
+    res.json({ 
+      success: true, 
+      message: 'OTP sent successfully', 
+      otp: otp, // Remove this in production
+      test_mode: true 
+    });
+  } catch (error) {
+    console.error('❌ OTP send error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send OTP: ' + error.message 
+    });
+  }
+});
+
+// Verify OTP
+app.post('/api/verify/check-otp', async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    console.log('🔐 Verifying OTP for:', phone);
+    
+    if (!phone || !otp) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Phone number and OTP are required' 
+      });
+    }
+
+    const otpData = otpStore.get(phone);
+    
+    if (!otpData) {
+      return res.json({ 
+        success: false, 
+        error: 'OTP not found or expired. Please request a new one.' 
+      });
+    }
+    
+    if (Date.now() > otpData.expiresAt) {
+      otpStore.delete(phone);
+      return res.json({ 
+        success: false, 
+        error: 'OTP has expired. Please request a new one.' 
+      });
+    }
+    
+    if (otpData.attempts >= 3) {
+      otpStore.delete(phone);
+      return res.json({ 
+        success: false, 
+        error: 'Too many attempts. OTP invalidated.' 
+      });
+    }
+
+    otpData.attempts++;
+    
+    if (otpData.otp !== otp) {
+      otpStore.set(phone, otpData);
+      return res.json({ 
+        success: false, 
+        error: `Invalid OTP. ${3 - otpData.attempts} attempts remaining.` 
+      });
+    }
+
+    // Get fresh villager data
+    const villager = await fetchVillagerByPhone(phone);
+    if (!villager) {
+      return res.json({ 
+        success: false, 
+        error: 'Villager data not found' 
+      });
+    }
+
+    // Get sensor count for this villager
+    const [[sensorCountResult]] = await db.query(
+      `SELECT COUNT(*) as sensor_count FROM sensors WHERE villager_id = ?`,
+      [villager.id]
+    );
+
+    // Generate authentication token
+    const token = 'villager-' + Date.now() + '-' + phone;
+    
+    // Clean up OTP
+    otpStore.delete(phone);
+
+    console.log('✅ OTP verified successfully for:', villager.name);
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: villager.id,
+        name: villager.name,
+        phone: villager.phone,
+        village: villager.village,
+        panchayat: villager.panchayat,
+        district: villager.district,
+        state: villager.state,
+        role: 'villager',
+        sensor_count: sensorCountResult.sensor_count || 0
+      },
+      permissions: { 
+        can_view: true, 
+        can_edit: false, 
+        can_delete: false 
+      }
+    });
+  } catch (error) {
+    console.error('❌ OTP verification error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'OTP verification failed: ' + error.message 
+    });
+  }
+});
+
+// Resend OTP
+app.post('/api/verify/resend-otp', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    console.log('📱 Resending OTP to:', phone);
+    
+    if (!phone) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Phone number is required' 
+      });
+    }
+
+    // Delete existing OTP
+    otpStore.delete(phone);
+    
+    // Generate new OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    
+    otpStore.set(phone, { 
+      otp, 
+      expiresAt, 
+      phone, 
+      attempts: 0 
+    });
+
+    console.log(`✅ New OTP ${otp} generated for ${phone}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'New OTP sent successfully', 
+      otp: otp, // Remove in production
+      test_mode: true 
+    });
+  } catch (error) {
+    console.error('❌ Resend OTP error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to resend OTP: ' + error.message 
+    });
+  }
+});
+
+// Simple login endpoint (alternative to OTP flow)
+app.post('/api/login', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    console.log('📱 Login attempt for phone:', phone);
+    
+    if (!phone || phone.length !== 10) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Please enter valid 10-digit phone number' 
+      });
+    }
+
+    const villager = await fetchVillagerByPhone(phone);
+    
+    if (!villager) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Villager not found' 
+      });
+    }
+    
+    const [[sensorCountResult]] = await db.query(
+      `SELECT COUNT(*) as sensor_count FROM sensors WHERE villager_id = ?`,
+      [villager.id]
+    );
+    
+    const token = 'villager-' + Date.now() + '-' + phone;
+    
+    res.json({ 
+      success: true, 
+      token: token, 
+      user: {
+        id: villager.id,
+        name: villager.name,
+        phone: villager.phone,
+        village: villager.village,
+        panchayat: villager.panchayat,
+        district: villager.district,
+        state: villager.state,
+        role: 'villager',
+        sensor_count: sensorCountResult.sensor_count || 0
+      }
+    });
+  } catch (err) {
+    console.error('❌ Login error:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
+  }
+});
+
+// Validate token
+app.get('/api/auth/validate', async (req, res) => {
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.json({ success: false, error: 'No token' });
+  }
+  if (token.startsWith('villager-') || token.startsWith('token-')) {
+    return res.json({ success: true, valid: true, message: 'Token is valid' });
+  }
+  return res.json({ success: false, valid: false, error: 'Invalid token' });
+});
+
 // ==================== SENSOR MANAGEMENT ====================
 
 // Get all sensors
@@ -502,7 +741,6 @@ app.get('/api/sensors', async (req, res) => {
     for (const sensor of sensorRows) {
       const snapshot = await fetchLatestSensorSnapshot(sensor.id, sensor.type);
       
-      // Get location info
       let location = sensor.location_description || 'Unknown';
       
       sensors.push({
@@ -708,16 +946,20 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
   }
 });
 
-// ==================== MOBILE ENDPOINTS ====================
+// ==================== MOBILE SENSORS ENDPOINT ====================
 
 app.get('/api/mobile/sensors', async (req, res) => {
   try {
     const { phone } = req.query;
-    if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Phone number is required' });
+    }
 
     const villager = await fetchVillagerByPhone(phone);
 
-    if (!villager) return res.status(404).json({ success: false, error: 'Villager not found' });
+    if (!villager) {
+      return res.status(404).json({ success: false, error: 'Villager not found' });
+    }
 
     const [sensorRows] = await db.query(
       `SELECT s.id, s.name, s.type, s.location_description
@@ -806,23 +1048,6 @@ app.get('/api/admin/dashboard', async (req, res) => {
   } catch (error) {
     console.error('❌ Dashboard error:', error);
     res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ==================== SIMPLE AUTHENTICATION ====================
-
-app.post('/api/login', async (req, res) => {
-  const { phone } = req.body;
-  if (!phone || phone.length !== 10) {
-    return res.status(400).json({ success: false, error: 'Please enter valid 10-digit phone number' });
-  }
-
-  try {
-    const [rows] = await db.query(`SELECT id, name, phone FROM villagers WHERE phone = ?`, [phone]);
-    if (rows.length === 0) return res.status(404).json({ success: false, error: 'Villager not found' });
-    res.json({ success: true, token: 'villager-' + Date.now(), user: { ...rows[0], role: 'villager' } });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -932,13 +1157,19 @@ app.listen(PORT, () => {
   console.log(`📊 InfluxDB Bucket: ${INFLUX_CONFIG.bucket}`);
   console.log(`🏢 InfluxDB Org: ${INFLUX_CONFIG.org}`);
   console.log(`🔧 API:    /api/*`);
-  console.log(`📱 Mobile: /api/mobile/sensors`);
+  console.log(`📱 Mobile: /api/verify/*, /api/mobile/sensors`);
   console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
   console.log('══════════════════════════════════════════════════════');
-  console.log('✅ Test endpoints:');
-  console.log(`   GET /api/health - Check database connections`);
+  console.log('✅ Authentication Endpoints:');
+  console.log(`   POST /api/verify/check-phone - Check if phone exists`);
+  console.log(`   POST /api/verify/send-otp - Send OTP`);
+  console.log(`   POST /api/verify/check-otp - Verify OTP`);
+  console.log(`   POST /api/verify/resend-otp - Resend OTP`);
+  console.log(`   POST /api/login - Simple login`);
+  console.log('══════════════════════════════════════════════════════');
+  console.log('✅ Other Endpoints:');
   console.log(`   GET /api/sensors - List all sensors`);
+  console.log(`   GET /api/mobile/sensors?phone=XXX - Get user sensors`);
   console.log(`   GET /api/sensors/:devEUI/history - Get sensor history`);
-  console.log(`   GET /api/debug/raw - View raw InfluxDB data`);
   console.log('══════════════════════════════════════════════════════');
 });
