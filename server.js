@@ -58,7 +58,6 @@ if (process.env.MYSQL_URL) {
     await db.query('SELECT 1');
     console.log('✅ MySQL database connected successfully');
     
-    // Create system_settings table if not exists
     await db.query(`
       CREATE TABLE IF NOT EXISTS system_settings (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -702,6 +701,134 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
   }
 });
 
+// ==================== UNASSIGNED SENSORS ENDPOINT (FIXED) ====================
+
+app.get('/api/village-sensors/unassigned', async (req, res) => {
+  try {
+    const { village } = req.query;
+    console.log('📍 Fetching unassigned sensors for village:', village);
+    
+    if (!village) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Village name is required' 
+      });
+    }
+
+    const searchTerm = `%${String(village).trim().toLowerCase()}%`;
+    
+    const [sensorRows] = await db.query(
+      `SELECT s.id, s.name, s.type, s.status, s.location_description, 
+              s.villager_id, s.panchayat_id, s.district_id
+       FROM sensors s
+       WHERE s.villager_id IS NULL
+         AND (
+           LOWER(COALESCE(s.location_description, '')) LIKE ?
+           OR LOWER(COALESCE(s.name, '')) LIKE ?
+         )
+       ORDER BY s.name ASC`,
+      [searchTerm, searchTerm]
+    );
+
+    console.log(`📊 Found ${sensorRows.length} unassigned sensors`);
+
+    const sensors = [];
+    
+    for (const sensor of sensorRows) {
+      const snapshot = await fetchLatestSensorSnapshot(sensor.id, sensor.type);
+      
+      sensors.push({
+        id: sensor.id,
+        devEUI: sensor.id,
+        name: sensor.name,
+        type: sensor.type,
+        location: sensor.location_description,
+        measurement: snapshot.measurement,
+        time: snapshot.time,
+        status: snapshot.status,
+        isAssigned: false
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      village: village, 
+      sensors: sensors, 
+      count: sensors.length 
+    });
+  } catch (err) {
+    console.error('❌ Error fetching unassigned sensors:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
+  }
+});
+
+// ==================== MAP SENSOR TO VILLAGER ====================
+
+app.post('/api/sensors/map', async (req, res) => {
+  try {
+    const { devEUI, phone } = req.body;
+    console.log('📍 Mapping sensor:', devEUI, 'to phone:', phone);
+    
+    if (!devEUI || !phone) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'devEUI and phone are required' 
+      });
+    }
+
+    const conn = await db.getConnection();
+    await conn.beginTransaction();
+
+    try {
+      const villager = await fetchVillagerByPhone(phone, conn);
+      if (!villager) {
+        throw new Error('Villager not found with this phone number');
+      }
+
+      const [[sensor]] = await conn.query(
+        `SELECT id, villager_id FROM sensors WHERE id = ?`,
+        [devEUI]
+      );
+      
+      if (!sensor) {
+        throw new Error('Sensor not found with this id');
+      }
+
+      if (sensor.villager_id !== null) {
+        throw new Error('Sensor is already mapped to another villager');
+      }
+
+      await conn.query(
+        `UPDATE sensors SET villager_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [villager.id, sensor.id]
+      );
+      
+      await conn.commit();
+      
+      console.log('✅ Sensor mapped successfully');
+      res.json({ 
+        success: true, 
+        message: 'Sensor mapped successfully' 
+      });
+      
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    console.error('❌ Error mapping sensor:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
+  }
+});
+
 // ==================== MOBILE ENDPOINTS ====================
 
 app.get('/api/mobile/sensors', async (req, res) => {
@@ -1196,18 +1323,8 @@ app.listen(PORT, () => {
   console.log(`🏢 InfluxDB Org: ${INFLUX_CONFIG.org}`);
   console.log(`🔧 API:    /api/*`);
   console.log(`📱 Mobile: /api/verify/*, /api/mobile/sensors`);
+  console.log(`📋 Unassigned Sensors: /api/village-sensors/unassigned?village=NAME`);
+  console.log(`🔗 Map Sensor: /api/sensors/map`);
   console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
-  console.log('══════════════════════════════════════════════════════');
-  console.log('✅ Authentication Endpoints:');
-  console.log(`   POST /api/verify/check-phone - Check if phone exists`);
-  console.log(`   POST /api/verify/send-otp - Send OTP`);
-  console.log(`   POST /api/verify/check-otp - Verify OTP`);
-  console.log(`   POST /api/verify/resend-otp - Resend OTP`);
-  console.log(`   POST /api/login - Simple login`);
-  console.log('══════════════════════════════════════════════════════');
-  console.log('✅ Other Endpoints:');
-  console.log(`   GET /api/sensors - List all sensors`);
-  console.log(`   GET /api/mobile/sensors?phone=XXX - Get user sensors`);
-  console.log(`   GET /api/sensors/:devEUI/history - Get sensor history`);
   console.log('══════════════════════════════════════════════════════');
 });
