@@ -86,94 +86,6 @@ async function getDistrictName(districtId) {
   return rows.length > 0 ? rows[0].name : null;
 }
 
-// Helper function to get sensor type mapping
-function getSensorTypeMapping(type) {
-  const typeMap = {
-    'Temp': 'temperature',
-    'Temperature': 'temperature',
-    'Humidity': 'humidity',
-    'AirQuality': 'air_quality',
-    'SoilMoisture': 'soil_moisture',
-    'SoilPH': 'soil_ph',
-    'WaterPH': 'water_ph',
-    'WaterSalinity': 'water_salinity',
-    'Rainfall': 'rainfall',
-    'WaterLevel': 'water_level'
-  };
-  return typeMap[type] || type.toLowerCase();
-}
-
-// Updated function to fetch sensor data from InfluxDB using district_name + type
-async function fetchLatestSensorSnapshot(sensorId, sensorType, districtId) {
-  try {
-    // Get district name
-    const districtName = await getDistrictName(districtId);
-    if (!districtName) {
-      console.log(`⚠️ No district found for sensor ${sensorId}, district_id: ${districtId}`);
-      return { measurement: 'No data', time: '', status: 'Offline', numericValue: null };
-    }
-    
-    // Build measurement name: district_name_sensor_type
-    const measurementName = `${districtName}_${sensorType}`;
-    console.log(`📊 Querying InfluxDB: measurement=${measurementName}, sensor_id=${sensorId}`);
-    
-    const dataQuery = `
-      from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: -5m)
-        |> filter(fn: (r) => r._measurement == "${measurementName}")
-        |> filter(fn: (r) => r.sensor_id == "${sensorId}")
-        |> last()
-    `;
-
-    const data = await queryInfluxDB(dataQuery);
-
-    let measurement = 'No data';
-    let time = '';
-    let status = 'Offline';
-    let numericValue = null;
-
-    if (data && data.length > 0) {
-      const point = data[0];
-      const readingTime = new Date(point._time);
-      time = readingTime.toLocaleString();
-      const diffSeconds = (Date.now() - readingTime.getTime()) / 1000;
-      status = diffSeconds <= 22 ? 'Live' : 'Offline';
-      
-      // Get the value from _value field (this is what InfluxDB returns)
-      let value = null;
-      
-      if (point._value !== undefined && point._value !== null) {
-        value = point._value;
-      }
-      else if (point.value !== undefined) {
-        value = point.value;
-      }
-      
-      if (value !== null && value !== undefined) {
-        const numValue = typeof value === 'number' ? value : parseFloat(value);
-        if (!isNaN(numValue)) {
-          numericValue = numValue;
-          const unit = getUnitForType(sensorType);
-          measurement = `${sensorType}: ${numValue.toFixed(2)} ${unit}`;
-        }
-      }
-      
-      if (measurement === 'No data' && point.measurement) {
-        measurement = point.measurement;
-      }
-      
-      console.log(`✅ Sensor ${sensorId} - Status: ${status}, Value: ${numericValue}, Time: ${time}`);
-    } else {
-      console.log(`⚠️ No data found for sensor ${sensorId} in measurement ${measurementName}`);
-    }
-
-    return { measurement, time, status, numericValue };
-  } catch (error) {
-    console.error(`❌ Error fetching snapshot for sensor ${sensorId}:`, error.message);
-    return { measurement: 'Error', time: '', status: 'Offline', numericValue: null };
-  }
-}
-
 const VILLAGER_WITH_LOCATION_SQL = `
   SELECT
     v.id,
@@ -277,6 +189,68 @@ function getUnitForType(type) {
   return units[type] || '';
 }
 
+// FIXED: Updated to read _value field correctly
+async function fetchLatestSensorSnapshot(sensorId, sensorType, districtId) {
+  try {
+    const districtName = await getDistrictName(districtId);
+    if (!districtName) {
+      console.log(`⚠️ No district found for sensor ${sensorId}, district_id: ${districtId}`);
+      return { measurement: 'No data', time: '', status: 'Offline', numericValue: null };
+    }
+    
+    const measurementName = `${districtName}_${sensorType}`;
+    
+    const dataQuery = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -5m)
+        |> filter(fn: (r) => r._measurement == "${measurementName}")
+        |> filter(fn: (r) => r.sensor_id == "${sensorId}")
+        |> last()
+    `;
+
+    const data = await queryInfluxDB(dataQuery);
+
+    let measurement = 'No data';
+    let time = '';
+    let status = 'Offline';
+    let numericValue = null;
+
+    if (data && data.length > 0) {
+      const point = data[0];
+      const readingTime = new Date(point._time);
+      time = readingTime.toLocaleString();
+      const diffSeconds = (Date.now() - readingTime.getTime()) / 1000;
+      status = diffSeconds <= 22 ? 'Live' : 'Offline';
+      
+      // Read the _value field (this is what InfluxDB returns)
+      let value = null;
+      if (point._value !== undefined && point._value !== null) {
+        value = point._value;
+      } else if (point.value !== undefined) {
+        value = point.value;
+      }
+      
+      if (value !== null && value !== undefined) {
+        const numValue = typeof value === 'number' ? value : parseFloat(value);
+        if (!isNaN(numValue)) {
+          numericValue = numValue;
+          const unit = getUnitForType(sensorType);
+          measurement = `${sensorType}: ${numValue.toFixed(2)} ${unit}`;
+        }
+      }
+      
+      if (measurement === 'No data' && point.measurement) {
+        measurement = point.measurement;
+      }
+    }
+
+    return { measurement, time, status, numericValue };
+  } catch (error) {
+    console.error(`❌ Error fetching snapshot for sensor ${sensorId}:`, error.message);
+    return { measurement: 'Error', time: '', status: 'Offline', numericValue: null };
+  }
+}
+
 // ==================== MIDDLEWARE ====================
 
 app.use(cors({
@@ -320,15 +294,13 @@ async function queryInfluxDB(fluxQuery) {
   }
 }
 
-const SENSOR_ACTIVE_THRESHOLD = 22; // seconds
+const SENSOR_ACTIVE_THRESHOLD = 22;
 
 async function getActiveSensorCount() {
   try {
-    // Get all sensors with their district info
     const [sensors] = await db.query(`
-      SELECT s.id, s.type, s.district_id, l.name as district_name
+      SELECT s.id, s.type, s.district_id
       FROM sensors s
-      LEFT JOIN locations l ON l.id = s.district_id
       WHERE s.villager_id IS NOT NULL
     `);
     
@@ -399,11 +371,9 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// Test InfluxDB connection with proper measurement format
 app.get('/api/test-influx', async (req, res) => {
   try {
-    // Test query for a known district
-    const testMeasurement = 'Mala_Temp';
+    const testMeasurement = 'Thrissur_Temp';
     const query = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: -1h)
@@ -470,7 +440,6 @@ app.post('/api/villagers', async (req, res) => {
 
 // ==================== SENSOR MANAGEMENT ====================
 
-// Get all sensors
 app.get('/api/sensors', async (req, res) => {
   try {
     const [sensorRows] = await db.query(`
@@ -509,7 +478,6 @@ app.get('/api/sensors', async (req, res) => {
   }
 });
 
-// Get single sensor
 app.get('/api/sensors/:devEUI', async (req, res) => {
   try {
     const { devEUI } = req.params;
@@ -550,7 +518,6 @@ app.get('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// Add new sensor
 app.post('/api/sensors', async (req, res) => {
   const { devEUI, name, type, location_description, panchayat_id, district_id } = req.body;
 
@@ -576,7 +543,6 @@ app.post('/api/sensors', async (req, res) => {
   }
 });
 
-// Update sensor
 app.put('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
   const { name, type, location_description, status } = req.body;
@@ -597,7 +563,6 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
   }
 });
 
-// Delete sensor
 app.delete('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
 
@@ -636,14 +601,12 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     }
     
     const sensorType = sensorInfo[0].type;
-    const districtId = sensorInfo[0].district_id;
     const districtName = sensorInfo[0].district_name;
     
     if (!districtName) {
       return res.json({ success: true, history: [], count: 0, message: 'District not found for sensor' });
     }
     
-    // Build measurement name
     const measurementName = `${districtName}_${sensorType}`;
     console.log(`📊 Querying history: measurement=${measurementName}, sensor_id=${devEUI}`);
 
@@ -669,11 +632,10 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       let value = null;
       let timestamp = row._time;
       
-      // Get value from _value field (what InfluxDB returns)
+      // Read the _value field
       if (row._value !== undefined && row._value !== null) {
         value = typeof row._value === 'number' ? row._value : parseFloat(row._value);
-      }
-      else if (row.value !== undefined) {
+      } else if (row.value !== undefined) {
         value = typeof row.value === 'number' ? row.value : parseFloat(row.value);
       }
       
@@ -687,10 +649,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     }
 
     console.log(`✅ Returning ${history.length} valid numeric data points`);
-    
-    if (history.length > 0) {
-      console.log(`📊 Value range: ${Math.min(...history.map(h => h.value))} - ${Math.max(...history.map(h => h.value))}`);
-    }
 
     res.json({
       success: true,
@@ -709,9 +667,9 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     });
   }
 });
+
 // ==================== MOBILE ENDPOINTS ====================
 
-// Get sensors for a specific villager (mobile app)
 app.get('/api/mobile/sensors', async (req, res) => {
   try {
     const { phone } = req.query;
@@ -727,7 +685,6 @@ app.get('/api/mobile/sensors', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Villager not found' });
     }
 
-    // Get sensors assigned to this villager with district info
     const [sensorRows] = await db.query(`
       SELECT s.id, s.name, s.type, s.location_description, s.district_id,
              l.name as district_name
@@ -842,7 +799,6 @@ app.get('/api/village-sensors/unassigned', async (req, res) => {
   }
 });
 
-// Map sensor to villager
 app.post('/api/sensors/map', async (req, res) => {
   try {
     const { devEUI, phone } = req.body;
@@ -1273,19 +1229,14 @@ app.get('/api/debug/influx-check/:devEUI', async (req, res) => {
     
     const data = await queryInfluxDB(fluxQuery);
     
-    const availableFields = new Set();
     const sampleData = [];
     
     for (const row of data) {
-      const fields = Object.keys(row).filter(k => 
-        !k.startsWith('_') && k !== 'sensor_id' && k !== 'result' && k !== 'table'
-      );
-      fields.forEach(f => availableFields.add(f));
-      
       sampleData.push({
         time: row._time,
-        fields: fields,
-        data: row
+        value: row._value,
+        measurement: row._measurement,
+        sensor_id: row.sensor_id
       });
     }
     
@@ -1301,7 +1252,6 @@ app.get('/api/debug/influx-check/:devEUI', async (req, res) => {
       measurementName: measurementName,
       hasData: data.length > 0,
       dataCount: data.length,
-      availableFields: Array.from(availableFields),
       sampleData: sampleData.slice(0, 5),
       expectedMeasurement: measurementName
     });
@@ -1367,7 +1317,8 @@ app.listen(PORT, () => {
   console.log('══════════════════════════════════════════════════════');
   console.log('📊 InfluxDB Query Format:');
   console.log('   Measurement = <district_name>_<sensor_type>');
-  console.log('   Example: Mala_Temp, Thrissur_Humidity');
+  console.log('   Example: Thrissur_Temp, Thrissur_Humidity');
   console.log('   Tag: sensor_id = <sensor_id>');
+  console.log('   Value field: _value');
   console.log('══════════════════════════════════════════════════════');
 });
