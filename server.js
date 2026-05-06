@@ -7,12 +7,12 @@ const app = express();
 
 // ==================== DATABASE CONFIGURATIONS ====================
 
-// InfluxDB Configuration - UPDATED with your actual values
+// InfluxDB Configuration
 const INFLUX_CONFIG = {
   url: process.env.INFLUX_URL || 'https://us-east-1-1.aws.cloud2.influxdata.com',
   token: process.env.INFLUX_TOKEN,
-  org: process.env.INFLUX_ORG || 'SmartPanchayat',  // Changed from 'Smart Panchayat'
-  bucket: process.env.INFLUX_BUCKET || 'sensor_data'  // Changed from 'smart_panchayat'
+  org: process.env.INFLUX_ORG || 'SmartPanchayat',
+  bucket: process.env.INFLUX_BUCKET || 'sensor_data'
 };
 
 const PORT = process.env.PORT || 8181;
@@ -21,15 +21,12 @@ const PORT = process.env.PORT || 8181;
 const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.token });
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// MySQL Configuration - Using your railway credentials
+// MySQL Configuration
 const mysql = require('mysql2');
 
 console.log('🔧 Configuration:');
 console.log('   InfluxDB Bucket:', INFLUX_CONFIG.bucket);
 console.log('   InfluxDB Org:', INFLUX_CONFIG.org);
-console.log('   MySQL Host:', process.env.MYSQL_HOST || 'switchback.proxy.rlwy.net');
-console.log('   MySQL Port:', process.env.MYSQL_PORT || '59975');
-console.log('   MySQL Database:', process.env.MYSQL_DATABASE || 'railway');
 
 let db;
 if (process.env.MYSQL_URL) {
@@ -41,12 +38,14 @@ if (process.env.MYSQL_URL) {
     queueLimit: 0
   }).promise();
 } else {
+  console.log('   MySQL Host:', process.env.MYSQL_HOST);
+  console.log('   MySQL Port:', process.env.MYSQL_PORT);
   db = mysql.createPool({
-    host: process.env.MYSQL_HOST || 'switchback.proxy.rlwy.net',
+    host: process.env.MYSQL_HOST,
     user: process.env.MYSQL_USER,
     password: process.env.MYSQL_PASSWORD,
-    database: process.env.MYSQL_DATABASE || 'railway',
-    port: parseInt(process.env.MYSQL_PORT) || 59975,
+    database: process.env.MYSQL_DATABASE,
+    port: parseInt(process.env.MYSQL_PORT) || 3306,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
@@ -59,6 +58,7 @@ if (process.env.MYSQL_URL) {
     await db.query('SELECT 1');
     console.log('✅ MySQL database connected successfully');
     
+    // Create system_settings table if not exists
     await db.query(`
       CREATE TABLE IF NOT EXISTS system_settings (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -68,16 +68,30 @@ if (process.env.MYSQL_URL) {
       )
     `);
     
+    // Add type column to sensors table if it doesn't exist (MySQL 5.6 compatible)
     try {
-      await db.query(`
-        ALTER TABLE sensors 
-        ADD COLUMN IF NOT EXISTS type VARCHAR(50) DEFAULT 'general' AFTER name
+      // Check if column exists first
+      const [columns] = await db.query(`
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_NAME = 'sensors' 
+        AND COLUMN_NAME = 'type'
       `);
-      console.log('✅ Sensors table ready');
+      
+      if (columns.length === 0) {
+        await db.query(`
+          ALTER TABLE sensors 
+          ADD COLUMN type VARCHAR(50) DEFAULT 'general' AFTER name
+        `);
+        console.log('✅ Added type column to sensors table');
+      } else {
+        console.log('✅ Type column already exists in sensors table');
+      }
     } catch (error) {
       console.log('ℹ️ Note:', error.message);
     }
     
+    console.log('✅ Database setup complete');
   } catch (error) {
     console.error('❌ MySQL connection failed:', error.message);
   }
@@ -249,7 +263,6 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType) {
     const diffSeconds = (Date.now() - readingTime.getTime()) / 1000;
     status = diffSeconds <= 22 ? 'Live' : 'Offline';
     
-    // Try different methods to extract value
     let value = null;
     
     if (point[sensorType] !== undefined) {
