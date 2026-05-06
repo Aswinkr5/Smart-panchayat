@@ -68,29 +68,6 @@ if (process.env.MYSQL_URL) {
       )
     `);
     
-    // Add type column to sensors table if it doesn't exist (MySQL 5.6 compatible)
-    try {
-      // Check if column exists first
-      const [columns] = await db.query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'sensors' 
-        AND COLUMN_NAME = 'type'
-      `);
-      
-      if (columns.length === 0) {
-        await db.query(`
-          ALTER TABLE sensors 
-          ADD COLUMN type VARCHAR(50) DEFAULT 'general' AFTER name
-        `);
-        console.log('✅ Added type column to sensors table');
-      } else {
-        console.log('✅ Type column already exists in sensors table');
-      }
-    } catch (error) {
-      console.log('ℹ️ Note:', error.message);
-    }
-    
     console.log('✅ Database setup complete');
   } catch (error) {
     console.error('❌ MySQL connection failed:', error.message);
@@ -100,6 +77,7 @@ if (process.env.MYSQL_URL) {
 // ==================== OTP STORE ====================
 const otpStore = new Map();
 
+// Updated SQL queries to match your schema
 const VILLAGER_WITH_LOCATION_SQL = `
   SELECT
     v.id,
@@ -465,8 +443,13 @@ app.get('/api/test-influx', async (req, res) => {
 app.get('/api/villagers', async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT id, aadhaar AS aadhaar_number, name, phone, village, panchayat, district, state, occupation, address, created_at
-       FROM villagers ORDER BY created_at DESC`
+      `SELECT v.id, v.name, v.phone, v.address, v.created_at,
+       p.name as panchayat_name, d.name as district_name, st.name as state_name
+       FROM villagers v
+       LEFT JOIN locations p ON p.id = v.panchayat_id
+       LEFT JOIN locations d ON d.id = p.parent_id
+       LEFT JOIN locations st ON st.id = d.parent_id
+       ORDER BY v.created_at DESC`
     );
 
     res.json({ success: true, villagers: rows, count: rows.length });
@@ -476,328 +459,61 @@ app.get('/api/villagers', async (req, res) => {
   }
 });
 
-app.get('/api/villagers/:aadhaarNumber', async (req, res) => {
-  try {
-    const { aadhaarNumber } = req.params;
-    const [rows] = await db.query(
-      `SELECT id, aadhaar AS aadhaar_number, name, phone, village, panchayat, district, state, occupation, address, created_at
-       FROM villagers WHERE aadhaar = ?`,
-      [aadhaarNumber]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Villager not found' });
-    }
-
-    res.json({ success: true, villager: rows[0] });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 app.post('/api/villagers', async (req, res) => {
   try {
-    const { aadhaarNumber, name, phone, village, panchayat, district, state, occupation, address } = req.body;
+    const { name, phone, address, panchayat_id } = req.body;
 
-    if (!aadhaarNumber || !name || !phone || !village || !panchayat || !district || !state) {
+    if (!name || !phone) {
       return res.status(400).json({ 
         success: false, 
-        error: 'Missing required fields: aadhaarNumber, name, phone, village, panchayat, district, state' 
+        error: 'Missing required fields: name, phone' 
       });
     }
 
     await db.query(
-      `INSERT INTO villagers (aadhaar, name, phone, village, panchayat, district, state, occupation, address)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [aadhaarNumber, name, phone, village, panchayat, district, state, occupation, address]
+      `INSERT INTO villagers (name, phone, address, panchayat_id)
+       VALUES (?, ?, ?, ?)`,
+      [name, phone, address, panchayat_id || null]
     );
 
     res.json({ success: true, message: 'Villager added successfully' });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ success: false, error: 'Aadhaar or phone already exists' });
+      return res.status(409).json({ success: false, error: 'Phone already exists' });
     }
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.put('/api/villagers/:aadhaarNumber', async (req, res) => {
-  try {
-    const { aadhaarNumber } = req.params;
-    const { name, phone, village, panchayat, district, state, occupation, address } = req.body;
-
-    const [result] = await db.query(
-      `UPDATE villagers SET name = ?, phone = ?, village = ?, panchayat = ?, district = ?, state = ?, occupation = ?, address = ?
-       WHERE aadhaar = ?`,
-      [name, phone, village, panchayat, district, state, occupation, address, aadhaarNumber]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, error: 'Villager not found' });
-    }
-
-    res.json({ success: true, message: 'Villager updated' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.delete('/api/villagers/:aadhaarNumber', async (req, res) => {
-  try {
-    const { aadhaarNumber } = req.params;
-    const [result] = await db.query(`DELETE FROM villagers WHERE aadhaar = ?`, [aadhaarNumber]);
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, error: 'Villager not found' });
-    }
-
-    res.json({ success: true, message: 'Villager deleted' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/villagers/:aadhaar/sensors', async (req, res) => {
-  try {
-    const { aadhaar } = req.params;
-
-    const [[villager]] = await db.query(
-      `SELECT id, name, aadhaar, phone, village, panchayat, district, state
-       FROM villagers WHERE aadhaar = ?`,
-      [aadhaar]
-    );
-
-    if (!villager) {
-      return res.status(404).json({ success: false, error: 'Villager not found' });
-    }
-
-    const [sensors] = await db.query(
-      `SELECT s.id, s.devEUI, s.name, s.type, s.village, s.panchayat, s.district, s.state
-       FROM sensors s JOIN villager_sensors vs ON vs.sensor_id = s.id WHERE vs.villager_id = ?`,
-      [villager.id]
-    );
-
-    const result = [];
-
-    for (const sensor of sensors) {
-      const snapshot = await fetchLatestSensorSnapshot(sensor.devEUI, sensor.type);
-      
-      result.push({
-        devEUI: sensor.devEUI,
-        name: sensor.name,
-        type: sensor.type,
-        village: sensor.village,
-        panchayat: sensor.panchayat,
-        district: sensor.district,
-        state: sensor.state,
-        measurement: snapshot.measurement,
-        time: snapshot.time,
-        status: snapshot.status
-      });
-    }
-
-    res.json({ success: true, villager, sensors: result });
-  } catch (err) {
-    console.error('❌ Error fetching villager sensors:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // ==================== SENSOR MANAGEMENT ====================
 
-// Get sensors by district
-app.get('/api/sensors/by-district', async (req, res) => {
-  try {
-    const { district } = req.query;
-    console.log('📍 Fetching sensors for district:', district);
-
-    if (!district) {
-      return res.status(400).json({
-        success: false,
-        error: 'District name is required'
-      });
-    }
-
-    const [sensorRows] = await db.query(
-      `${SENSOR_WITH_LOCATION_SQL}
-       WHERE (
-         d.name = ?
-         OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
-         OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
-       )
-       ORDER BY s.name ASC`,
-      [district, district, district]
-    );
-
-    console.log(`📊 Found ${sensorRows.length} sensors in ${district} district`);
-
-    const sensors = [];
-
-    for (const sensorRow of sensorRows) {
-      sensors.push(await buildSensorPayload(sensorRow));
-    }
-
-    res.json({
-      success: true,
-      district: district,
-      sensors: sensors,
-      count: sensors.length
-    });
-
-  } catch (err) {
-    console.error('❌ Error fetching sensors by district:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// Get district statistics
-app.get('/api/district-stats/:district', async (req, res) => {
-  try {
-    const { district } = req.params;
-    
-    console.log(`📍 Fetching statistics for district: ${district}`);
-    
-    const [sensorRows] = await db.query(
-      `${SENSOR_WITH_LOCATION_SQL}
-       WHERE s.villager_id IS NULL
-         AND (
-           d.name = ?
-           OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
-           OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
-         )
-       ORDER BY s.type ASC, s.name ASC`,
-      [district, district, district]
-    );
-    
-    console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
-    
-    const sensorsByType = {};
-    
-    for (const sensor of sensorRows) {
-      const sensorType = sensor.sensor_type;
-      if (!sensorsByType[sensorType]) {
-        sensorsByType[sensorType] = [];
-      }
-      sensorsByType[sensorType].push(sensor);
-    }
-    
-    const stats = {};
-    
-    for (const [type, sensors] of Object.entries(sensorsByType)) {
-      let total = 0;
-      let validCount = 0;
-      const sensorValues = [];
-      
-      for (const sensor of sensors) {
-        try {
-          const snapshot = await fetchLatestSensorSnapshot(
-            sensor.sensor_id,
-            sensor.sensor_type
-          );
-          const value = snapshot.numericValue;
-
-          if (value !== null && !isNaN(value) && value > 0) {
-            total += value;
-            validCount++;
-            sensorValues.push({
-              name: sensor.sensor_name,
-              village: normalizeSensorLocation(sensor).village,
-              value: value
-            });
-          }
-        } catch (err) {
-          console.log(`Error fetching data for sensor ${sensor.sensor_id}:`, err.message);
-        }
-      }
-      
-      if (validCount > 0) {
-        const average = total / validCount;
-        stats[type] = {
-          count: validCount,
-          totalSensors: sensors.length,
-          average: average,
-          unit: getUnitForType(type),
-          sensors: sensorValues,
-          lastUpdated: new Date().toISOString()
-        };
-      } else {
-        stats[type] = {
-          count: 0,
-          totalSensors: sensors.length,
-          average: null,
-          unit: getUnitForType(type),
-          sensors: [],
-          lastUpdated: null
-        };
-      }
-    }
-    
-    res.json({
-      success: true,
-      district: district,
-      stats: stats,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (err) {
-    console.error('❌ Error fetching district statistics:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// Get single sensor
-app.get('/api/sensors/:devEUI', async (req, res) => {
-  try {
-    const { devEUI } = req.params;
-
-    const [rows] = await db.query(
-      `${SENSOR_WITH_LOCATION_SQL}
-       WHERE s.id = ?`,
-      [devEUI]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Sensor not found' });
-    }
-
-    const sensor = await buildSensorPayload(rows[0]);
-    res.json({ success: true, sensor });
-  } catch (err) {
-    console.error('❌ Error fetching sensor:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 // Get all sensors
 app.get('/api/sensors', async (req, res) => {
   try {
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, type, village, panchayat, district, state
-       FROM sensors ORDER BY id DESC`
+      `SELECT s.id, s.name, s.type, s.status, s.location_description, 
+              s.villager_id, s.installed_at, s.updated_at
+       FROM sensors s
+       ORDER BY s.installed_at DESC`
     );
 
     const sensors = [];
 
     for (const sensor of sensorRows) {
-      const snapshot = await fetchLatestSensorSnapshot(sensor.devEUI, sensor.type);
+      const snapshot = await fetchLatestSensorSnapshot(sensor.id, sensor.type);
+      
+      // Get location info
+      let location = sensor.location_description || 'Unknown';
       
       sensors.push({
-        devEUI: sensor.devEUI,
-        name: sensor.name,
+        devEUI: sensor.id,
+        name: sensor.name || sensor.id,
         type: sensor.type,
-        village: sensor.village,
-        panchayat: sensor.panchayat,
-        district: sensor.district,
-        state: sensor.state,
+        village: location,
         measurement: snapshot.measurement,
         time: snapshot.time,
-        status: snapshot.status
+        status: snapshot.status,
+        isAssigned: sensor.villager_id !== null
       });
     }
 
@@ -808,78 +524,89 @@ app.get('/api/sensors', async (req, res) => {
   }
 });
 
-// Add new sensor
-app.post('/api/sensors', async (req, res) => {
-  const { devEUI, deviceName, type, village, panchayat, district, state, phone } = req.body;
-
-  if (!devEUI || !deviceName) {
-    return res.status(400).json({ success: false, error: 'devEUI and deviceName are required' });
-  }
-
-  let sensorType = type || determineSensorType(deviceName);
-
-  const conn = await db.getConnection();
+// Get single sensor
+app.get('/api/sensors/:devEUI', async (req, res) => {
   try {
-    await conn.beginTransaction();
+    const { devEUI } = req.params;
 
-    const [sensorResult] = await conn.query(
-      `INSERT INTO sensors (devEUI, name, type, village, panchayat, district, state)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [devEUI, deviceName, sensorType, village || null, panchayat || null, district || null, state || null]
+    const [rows] = await db.query(
+      `SELECT s.id, s.name, s.type, s.status, s.location_description, s.villager_id
+       FROM sensors s
+       WHERE s.id = ?`,
+      [devEUI]
     );
 
-    const sensorId = sensorResult.insertId;
-
-    if (phone) {
-      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
-      if (!villager) throw new Error('No villager found with this phone number');
-      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id) VALUES (?, ?)`, [villager.id, sensorId]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Sensor not found' });
     }
 
-    await conn.commit();
-    res.json({ success: true, message: phone ? 'Sensor registered and mapped to villager' : 'Sensor registered successfully' });
+    const sensor = rows[0];
+    const snapshot = await fetchLatestSensorSnapshot(sensor.id, sensor.type);
+
+    res.json({ 
+      success: true, 
+      sensor: {
+        id: sensor.id,
+        devEUI: sensor.id,
+        name: sensor.name,
+        type: sensor.type,
+        location: sensor.location_description,
+        measurement: snapshot.measurement,
+        time: snapshot.time,
+        status: snapshot.status,
+        isAssigned: sensor.villager_id !== null
+      }
+    });
   } catch (err) {
-    await conn.rollback();
+    console.error('❌ Error fetching sensor:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Add new sensor
+app.post('/api/sensors', async (req, res) => {
+  const { devEUI, name, type, location_description, panchayat_id, district_id } = req.body;
+
+  if (!devEUI) {
+    return res.status(400).json({ success: false, error: 'devEUI is required' });
+  }
+
+  let sensorType = type || determineSensorType(name || devEUI);
+
+  try {
+    await db.query(
+      `INSERT INTO sensors (id, name, type, location_description, panchayat_id, district_id, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'active')`,
+      [devEUI, name || devEUI, sensorType, location_description || null, panchayat_id || null, district_id || null]
+    );
+
+    res.json({ success: true, message: 'Sensor registered successfully' });
+  } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ success: false, error: 'Sensor already exists' });
     }
-    res.status(400).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // Update sensor
 app.put('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
-  const { deviceName, type, village, panchayat, district, state, phone } = req.body;
+  const { name, type, location_description, status } = req.body;
 
-  const conn = await db.getConnection();
   try {
-    await conn.beginTransaction();
-
-    const [result] = await conn.query(
-      `UPDATE sensors SET name = ?, type = ?, village = ?, panchayat = ?, district = ?, state = ? WHERE devEUI = ?`,
-      [deviceName, type || 'general', village || null, panchayat || null, district || null, state || null, devEUI]
+    const [result] = await db.query(
+      `UPDATE sensors SET name = ?, type = ?, location_description = ?, status = ? WHERE id = ?`,
+      [name || null, type || null, location_description || null, status || 'active', devEUI]
     );
 
-    if (result.affectedRows === 0) throw new Error('Sensor not found');
-
-    await conn.query(`DELETE FROM villager_sensors WHERE sensor_id = (SELECT id FROM sensors WHERE devEUI = ?)`, [devEUI]);
-
-    if (phone) {
-      const [[villager]] = await conn.query(`SELECT id FROM villagers WHERE phone = ?`, [phone]);
-      if (!villager) throw new Error('Villager not found');
-      await conn.query(`INSERT INTO villager_sensors (villager_id, sensor_id) VALUES (?, (SELECT id FROM sensors WHERE devEUI = ?))`, [villager.id, devEUI]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, error: 'Sensor not found' });
     }
 
-    await conn.commit();
-    res.json({ success: true });
+    res.json({ success: true, message: 'Sensor updated successfully' });
   } catch (err) {
-    await conn.rollback();
-    res.status(400).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -887,25 +614,16 @@ app.put('/api/sensors/:devEUI', async (req, res) => {
 app.delete('/api/sensors/:devEUI', async (req, res) => {
   const { devEUI } = req.params;
 
-  if (!devEUI) return res.status(400).json({ success: false, error: 'devEUI is required' });
-
-  const conn = await db.getConnection();
   try {
-    await conn.beginTransaction();
+    const [result] = await db.query(`DELETE FROM sensors WHERE id = ?`, [devEUI]);
 
-    const [[sensor]] = await conn.query(`SELECT id FROM sensors WHERE devEUI = ?`, [devEUI]);
-    if (!sensor) return res.status(404).json({ success: false, error: 'Sensor not found' });
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, error: 'Sensor not found' });
+    }
 
-    await conn.query(`DELETE FROM villager_sensors WHERE sensor_id = ?`, [sensor.id]);
-    await conn.query(`DELETE FROM sensors WHERE id = ?`, [sensor.id]);
-
-    await conn.commit();
     res.json({ success: true, message: 'Sensor deleted successfully' });
   } catch (err) {
-    await conn.rollback();
     res.status(500).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
   }
 });
 
@@ -961,14 +679,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       else if (row._value !== undefined) {
         value = typeof row._value === 'number' ? row._value : parseFloat(row._value);
       }
-      else {
-        for (let key in row) {
-          if (!key.startsWith('_') && typeof row[key] === 'number' && key !== 'devEUI') {
-            value = row[key];
-            break;
-          }
-        }
-      }
       
       if (value !== null && !isNaN(value) && isFinite(value)) {
         history.push({
@@ -998,117 +708,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
   }
 });
 
-// ==================== DISTRICT ENDPOINTS ====================
-
-app.get('/api/districts', async (req, res) => {
-  try {
-    const [rows] = await db.query(
-      `SELECT DISTINCT name
-       FROM locations
-       WHERE type = 'district'
-       ORDER BY name`
-    );
-    const districts = rows.map(row => row.name);
-    res.json({ success: true, districts, count: districts.length });
-  } catch (err) {
-    console.error('❌ Error fetching districts:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/all-district-stats', async (req, res) => {
-  try {
-    const [districtRows] = await db.query(
-      `SELECT DISTINCT name
-       FROM locations
-       WHERE type = 'district'
-       ORDER BY name`
-    );
-    
-    const allDistricts = districtRows.map(row => row.name);
-    const allStats = {};
-    
-    for (const district of allDistricts) {
-      const [sensorRows] = await db.query(
-        `${SENSOR_WITH_LOCATION_SQL}
-         WHERE s.villager_id IS NULL
-           AND (
-             d.name = ?
-             OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
-             OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
-           )
-         ORDER BY s.type ASC, s.name ASC`,
-        [district, district, district]
-      );
-      
-      const sensorsByType = {};
-      
-      for (const sensor of sensorRows) {
-        const sensorType = sensor.sensor_type;
-        if (!sensorsByType[sensorType]) {
-          sensorsByType[sensorType] = [];
-        }
-        sensorsByType[sensorType].push(sensor);
-      }
-      
-      const districtStats = {};
-      
-      for (const [type, sensors] of Object.entries(sensorsByType)) {
-        let total = 0;
-        let validCount = 0;
-        
-        const promises = sensors.map(async sensor => {
-          const snapshot = await fetchLatestSensorSnapshot(
-            sensor.sensor_id,
-            sensor.sensor_type
-          );
-          return snapshot.numericValue;
-        });
-        
-        const values = await Promise.all(promises);
-        
-        for (const value of values) {
-          if (value !== null && !isNaN(value) && value > 0) {
-            total += value;
-            validCount++;
-          }
-        }
-        
-        if (validCount > 0) {
-          districtStats[type] = {
-            count: validCount,
-            totalSensors: sensors.length,
-            average: total / validCount,
-            unit: getUnitForType(type),
-          };
-        } else {
-          districtStats[type] = {
-            count: 0,
-            totalSensors: sensors.length,
-            average: null,
-            unit: getUnitForType(type),
-          };
-        }
-      }
-      
-      allStats[district] = districtStats;
-    }
-    
-    res.json({
-      success: true,
-      stats: allStats,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (err) {
-    console.error('❌ Error fetching all district stats:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
 // ==================== MOBILE ENDPOINTS ====================
 
 app.get('/api/mobile/sensors', async (req, res) => {
@@ -1121,16 +720,27 @@ app.get('/api/mobile/sensors', async (req, res) => {
     if (!villager) return res.status(404).json({ success: false, error: 'Villager not found' });
 
     const [sensorRows] = await db.query(
-      `${SENSOR_WITH_LOCATION_SQL}
+      `SELECT s.id, s.name, s.type, s.location_description
+       FROM sensors s
        WHERE s.villager_id = ?
-       ORDER BY s.installed_at DESC, s.updated_at DESC, s.id DESC`,
+       ORDER BY s.installed_at DESC`,
       [villager.id]
     );
 
     const sensors = [];
 
-    for (const sensorRow of sensorRows) {
-      sensors.push(await buildSensorPayload(sensorRow, { includeAssignment: false }));
+    for (const sensor of sensorRows) {
+      const snapshot = await fetchLatestSensorSnapshot(sensor.id, sensor.type);
+      
+      sensors.push({
+        devEUI: sensor.id,
+        name: sensor.name || sensor.id,
+        type: sensor.type,
+        location: sensor.location_description,
+        measurement: snapshot.measurement,
+        time: snapshot.time,
+        status: snapshot.status
+      });
     }
 
     res.json({
@@ -1157,28 +767,24 @@ app.get('/api/mobile/sensors', async (req, res) => {
 app.get('/api/admin/dashboard', async (req, res) => {
   try {
     const [[{ totalVillagers }]] = await db.query(`SELECT COUNT(*) AS totalVillagers FROM villagers`);
-    const totalSensors = await getActiveSensorCount();
+    const [[{ totalSensors }]] = await db.query(`SELECT COUNT(*) AS totalSensors FROM sensors`);
+    const activeSensors = await getActiveSensorCount();
 
     const [recentVillagers] = await db.query(
-      `SELECT name, aadhaar AS aadhaar_number, village, panchayat, district, state, phone
-       FROM villagers ORDER BY created_at DESC LIMIT 5`
+      `SELECT name, phone, created_at FROM villagers ORDER BY created_at DESC LIMIT 5`
     );
 
     const [sensorRows] = await db.query(
-      `SELECT id, devEUI, name, type, village, panchayat, district, state FROM sensors ORDER BY installed_at DESC LIMIT 5`
+      `SELECT id, name, type, status FROM sensors ORDER BY installed_at DESC LIMIT 5`
     );
 
     const recentSensors = [];
     for (const sensor of sensorRows) {
-      const snapshot = await fetchLatestSensorSnapshot(sensor.devEUI, sensor.type);
+      const snapshot = await fetchLatestSensorSnapshot(sensor.id, sensor.type);
       recentSensors.push({
-        devEUI: sensor.devEUI,
-        name: sensor.name,
+        devEUI: sensor.id,
+        name: sensor.name || sensor.id,
         type: sensor.type,
-        village: sensor.village,
-        panchayat: sensor.panchayat,
-        district: sensor.district,
-        state: sensor.state,
         status: snapshot.status
       });
     }
@@ -1186,7 +792,13 @@ app.get('/api/admin/dashboard', async (req, res) => {
     res.json({
       success: true,
       data: {
-        statistics: { totalVillagers, totalSensors, totalVillages: 1, activeAlerts: 0 },
+        statistics: { 
+          totalVillagers, 
+          totalSensors, 
+          activeSensors,
+          totalVillages: 1, 
+          activeAlerts: 0 
+        },
         recentVillagers,
         recentSensors
       }
@@ -1197,148 +809,21 @@ app.get('/api/admin/dashboard', async (req, res) => {
   }
 });
 
-// ==================== MOBILE AUTHENTICATION ====================
+// ==================== SIMPLE AUTHENTICATION ====================
 
 app.post('/api/login', async (req, res) => {
-  const { aadhaarNumber } = req.body;
-  if (!aadhaarNumber || aadhaarNumber.length !== 12) {
-    return res.status(400).json({ success: false, error: 'Please enter valid 12-digit Aadhaar number' });
-  }
-
-  const isAdmin = aadhaarNumber === '999999999999';
-  if (isAdmin) {
-    return res.json({ success: true, token: 'token-' + Date.now(), user: { name: 'Admin User', aadhaarNumber, phone: '0000000000', role: 'admin' } });
+  const { phone } = req.body;
+  if (!phone || phone.length !== 10) {
+    return res.status(400).json({ success: false, error: 'Please enter valid 10-digit phone number' });
   }
 
   try {
-    const [rows] = await db.query(`SELECT name, phone, village, panchayat, district, state FROM villagers WHERE aadhaar = ?`, [aadhaarNumber]);
+    const [rows] = await db.query(`SELECT id, name, phone FROM villagers WHERE phone = ?`, [phone]);
     if (rows.length === 0) return res.status(404).json({ success: false, error: 'Villager not found' });
-    res.json({ success: true, token: 'villager-' + Date.now(), user: { ...rows[0], aadhaarNumber, role: 'villager' } });
+    res.json({ success: true, token: 'villager-' + Date.now(), user: { ...rows[0], role: 'villager' } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
-});
-
-app.post('/api/verify/check-phone', async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!phone || phone.length !== 10) {
-      return res.status(400).json({ success: false, error: 'Please enter valid 10-digit phone number' });
-    }
-
-    const villager = await fetchVillagerByPhone(phone);
-    if (!villager) {
-      return res.json({ success: false, error: 'Phone number not registered in our system' });
-    }
-
-    res.json({ success: true, message: 'Phone number verified', villager });
-  } catch (error) {
-    console.error('❌ Phone check error:', error);
-    res.status(500).json({ success: false, error: 'Failed to check phone number: ' + error.message });
-  }
-});
-
-app.post('/api/verify/send-otp', async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!phone || phone.length !== 10) {
-      return res.status(400).json({ success: false, error: 'Please enter valid 10-digit phone number' });
-    }
-
-    const villager = await fetchVillagerByPhone(phone);
-    if (!villager) return res.status(404).json({ success: false, error: 'Phone number not registered' });
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    otpStore.set(phone, { otp, expiresAt, phone, villagerId: villager.id, attempts: 0 });
-
-    console.log(`✅ OTP ${otp} generated for phone ${phone}`);
-    res.json({ success: true, message: 'OTP sent successfully', otp, test_mode: true });
-  } catch (error) {
-    console.error('❌ OTP send error:', error);
-    res.status(500).json({ success: false, error: 'Failed to send OTP: ' + error.message });
-  }
-});
-
-app.post('/api/verify/check-otp', async (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-    if (!phone || !otp) return res.status(400).json({ success: false, error: 'Phone number and OTP are required' });
-
-    const otpData = otpStore.get(phone);
-    if (!otpData) return res.json({ success: false, error: 'OTP not found or expired. Please request a new one.' });
-    if (Date.now() > otpData.expiresAt) {
-      otpStore.delete(phone);
-      return res.json({ success: false, error: 'OTP has expired. Please request a new one.' });
-    }
-    if (otpData.attempts >= 3) {
-      otpStore.delete(phone);
-      return res.json({ success: false, error: 'Too many attempts. OTP invalidated.' });
-    }
-
-    otpData.attempts++;
-    if (otpData.otp !== otp) {
-      otpStore.set(phone, otpData);
-      return res.json({ success: false, error: 'Invalid OTP. Attempts: ' + otpData.attempts });
-    }
-
-    const villager = await fetchVillagerByPhone(phone);
-    if (!villager) return res.json({ success: false, error: 'Villager data not found' });
-
-    const [[sensorCountResult]] = await db.query(
-      `SELECT COUNT(*) as sensor_count FROM sensors WHERE villager_id = ?`,
-      [villager.id]
-    );
-
-    const token = 'villager-' + Date.now() + '-' + phone;
-    otpStore.delete(phone);
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        name: villager.name,
-        phone,
-        village: villager.village,
-        panchayat: villager.panchayat,
-        district: villager.district,
-        state: villager.state,
-        role: 'villager',
-        sensor_count: sensorCountResult.sensor_count || 0
-      },
-      permissions: { can_view: true, can_edit: false, can_delete: false }
-    });
-  } catch (error) {
-    console.error('❌ OTP verification error:', error);
-    res.status(500).json({ success: false, error: 'OTP verification failed: ' + error.message });
-  }
-});
-
-app.post('/api/verify/resend-otp', async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
-
-    otpStore.delete(phone);
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-    otpStore.set(phone, { otp, expiresAt, phone, attempts: 0 });
-
-    console.log(`✅ New OTP ${otp} generated for ${phone}`);
-    res.json({ success: true, message: 'New OTP sent successfully', otp, test_mode: true });
-  } catch (error) {
-    console.error('❌ Resend OTP error:', error);
-    res.status(500).json({ success: false, error: 'Failed to resend OTP: ' + error.message });
-  }
-});
-
-app.get('/api/auth/validate', async (req, res) => {
-  const token = req.headers.authorization;
-  if (!token) return res.json({ success: false, error: 'No token' });
-  if (token.startsWith('villager-') || token.startsWith('token-')) {
-    return res.json({ success: true, valid: true, message: 'Token is valid' });
-  }
-  return res.json({ success: false, valid: false, error: 'Invalid token' });
 });
 
 // ==================== DEBUG ENDPOINTS ====================
@@ -1408,82 +893,6 @@ app.get('/api/debug/raw', async (req, res) => {
   }
 });
 
-// ==================== UNASSIGNED SENSORS & MAPPING ====================
-
-app.get('/api/village-sensors/unassigned', async (req, res) => {
-  try {
-    const { village } = req.query;
-    if (!village) return res.status(400).json({ success: false, error: 'Village name is required' });
-
-    const searchTerm = `%${String(village).trim().toLowerCase()}%`;
-    
-    const [sensorRows] = await db.query(
-      `${SENSOR_WITH_LOCATION_SQL}
-       WHERE s.villager_id IS NULL
-         AND (
-           LOWER(COALESCE(s.location_description, '')) LIKE ?
-           OR LOWER(COALESCE(p.name, '')) LIKE ?
-         )
-       ORDER BY s.name ASC`,
-      [searchTerm, searchTerm]
-    );
-
-    const sensors = [];
-    for (const sensorRow of sensorRows) {
-      sensors.push(await buildSensorPayload(sensorRow));
-    }
-
-    res.json({ success: true, village, sensors, count: sensors.length });
-  } catch (err) {
-    console.error('❌ Error fetching unassigned sensors:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.post('/api/sensors/map', async (req, res) => {
-  try {
-    const { devEUI, phone } = req.body;
-    if (!devEUI || !phone) return res.status(400).json({ success: false, error: 'devEUI and phone are required' });
-
-    const conn = await db.getConnection();
-    await conn.beginTransaction();
-
-    try {
-      const villager = await fetchVillagerByPhone(phone, conn);
-      if (!villager) throw new Error('Villager not found with this phone number');
-
-      const [[sensor]] = await conn.query(
-        `SELECT id, villager_id FROM sensors WHERE id = ?`,
-        [devEUI]
-      );
-      if (!sensor) throw new Error('Sensor not found with this id');
-
-      if (sensor.villager_id !== null) {
-        throw new Error('Sensor is already mapped to another villager');
-      }
-
-      await conn.query(
-        `UPDATE sensors
-         SET villager_id = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [villager.id, sensor.id]
-      );
-      
-      await conn.commit();
-      res.json({ success: true, message: 'Sensor mapped successfully' });
-      
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
-    }
-  } catch (err) {
-    console.error('❌ Error mapping sensor:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 // ==================== SERVING HTML PAGES ====================
 
 app.use(express.static('public'));
@@ -1523,13 +932,13 @@ app.listen(PORT, () => {
   console.log(`📊 InfluxDB Bucket: ${INFLUX_CONFIG.bucket}`);
   console.log(`🏢 InfluxDB Org: ${INFLUX_CONFIG.org}`);
   console.log(`🔧 API:    /api/*`);
-  console.log(`📱 Mobile: /api/verify/*, /api/mobile/sensors`);
+  console.log(`📱 Mobile: /api/mobile/sensors`);
   console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
   console.log('══════════════════════════════════════════════════════');
   console.log('✅ Test endpoints:');
   console.log(`   GET /api/health - Check database connections`);
-  console.log(`   GET /api/test-influx - Test InfluxDB connection`);
   console.log(`   GET /api/sensors - List all sensors`);
+  console.log(`   GET /api/sensors/:devEUI/history - Get sensor history`);
   console.log(`   GET /api/debug/raw - View raw InfluxDB data`);
   console.log('══════════════════════════════════════════════════════');
 });
