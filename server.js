@@ -7,12 +7,12 @@ const app = express();
 
 // ==================== DATABASE CONFIGURATIONS ====================
 
-// InfluxDB Configuration
+// InfluxDB Configuration - UPDATED with your actual values
 const INFLUX_CONFIG = {
   url: process.env.INFLUX_URL || 'https://us-east-1-1.aws.cloud2.influxdata.com',
   token: process.env.INFLUX_TOKEN,
-  org: process.env.INFLUX_ORG || 'Smart Panchayat',
-  bucket: process.env.INFLUX_BUCKET || 'smart_panchayat'
+  org: process.env.INFLUX_ORG || 'SmartPanchayat',  // Changed from 'Smart Panchayat'
+  bucket: process.env.INFLUX_BUCKET || 'sensor_data'  // Changed from 'smart_panchayat'
 };
 
 const PORT = process.env.PORT || 8181;
@@ -21,10 +21,15 @@ const PORT = process.env.PORT || 8181;
 const influxDB = new InfluxDB({ url: INFLUX_CONFIG.url, token: INFLUX_CONFIG.token });
 const queryApi = influxDB.getQueryApi(INFLUX_CONFIG.org);
 
-// MySQL Configuration
+// MySQL Configuration - Using your railway credentials
 const mysql = require('mysql2');
 
-console.log('🔧 MySQL Configuration:');
+console.log('🔧 Configuration:');
+console.log('   InfluxDB Bucket:', INFLUX_CONFIG.bucket);
+console.log('   InfluxDB Org:', INFLUX_CONFIG.org);
+console.log('   MySQL Host:', process.env.MYSQL_HOST || 'switchback.proxy.rlwy.net');
+console.log('   MySQL Port:', process.env.MYSQL_PORT || '59975');
+console.log('   MySQL Database:', process.env.MYSQL_DATABASE || 'railway');
 
 let db;
 if (process.env.MYSQL_URL) {
@@ -36,15 +41,12 @@ if (process.env.MYSQL_URL) {
     queueLimit: 0
   }).promise();
 } else {
-  console.log('   Host:', process.env.MYSQL_HOST);
-  console.log('   Database:', process.env.MYSQL_DATABASE);
-  console.log('   Port:', process.env.MYSQL_PORT);
   db = mysql.createPool({
-    host: process.env.MYSQL_HOST,
+    host: process.env.MYSQL_HOST || 'switchback.proxy.rlwy.net',
     user: process.env.MYSQL_USER,
     password: process.env.MYSQL_PASSWORD,
-    database: process.env.MYSQL_DATABASE,
-    port: parseInt(process.env.MYSQL_PORT) || 3306,
+    database: process.env.MYSQL_DATABASE || 'railway',
+    port: parseInt(process.env.MYSQL_PORT) || 59975,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
@@ -71,12 +73,11 @@ if (process.env.MYSQL_URL) {
         ALTER TABLE sensors 
         ADD COLUMN IF NOT EXISTS type VARCHAR(50) DEFAULT 'general' AFTER name
       `);
-      console.log('✅ Sensors table updated with type column');
+      console.log('✅ Sensors table ready');
     } catch (error) {
-      console.log('ℹ️ Type column may already exist');
+      console.log('ℹ️ Note:', error.message);
     }
     
-    console.log('✅ System settings table ready');
   } catch (error) {
     console.error('❌ MySQL connection failed:', error.message);
   }
@@ -251,19 +252,15 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType) {
     // Try different methods to extract value
     let value = null;
     
-    // Method 1: Direct field match
     if (point[sensorType] !== undefined) {
       value = point[sensorType];
     }
-    // Method 2: Check common field names
     else if (point.value !== undefined) {
       value = point.value;
     }
-    // Method 3: Check _value field
     else if (point._value !== undefined) {
       value = point._value;
     }
-    // Method 4: Search for any numeric field
     else {
       for (let key in point) {
         if (!key.startsWith('_') && typeof point[key] === 'number') {
@@ -282,7 +279,6 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType) {
       }
     }
     
-    // Use measurement field if available
     if (measurement === 'No data' && point.measurement) {
       measurement = point.measurement;
     }
@@ -414,6 +410,10 @@ app.get('/api/health', async (req, res) => {
       databases: {
         mysql: 'connected',
         influxdb: 'connected'
+      },
+      config: {
+        influxBucket: INFLUX_CONFIG.bucket,
+        influxOrg: INFLUX_CONFIG.org
       }
     });
   } catch (error) {
@@ -422,6 +422,28 @@ app.get('/api/health', async (req, res) => {
       error: 'Database connection failed',
       message: error.message
     });
+  }
+});
+
+// Test InfluxDB connection
+app.get('/api/test-influx', async (req, res) => {
+  try {
+    const query = `
+      from(bucket: "${INFLUX_CONFIG.bucket}")
+        |> range(start: -1h)
+        |> limit(n: 1)
+    `;
+    const result = await queryInfluxDB(query);
+    res.json({ 
+      success: true, 
+      message: 'InfluxDB connected', 
+      bucket: INFLUX_CONFIG.bucket,
+      org: INFLUX_CONFIG.org,
+      hasData: result.length > 0,
+      sampleData: result[0] || null 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -630,8 +652,8 @@ app.get('/api/district-stats/:district', async (req, res) => {
        WHERE s.villager_id IS NULL
          AND (
            d.name = ?
-           OR (d.id IS NULL AND parent.type = 'district' && parent.name = ?)
-           OR (d.id IS NULL AND grandparent.type = 'district' && grandparent.name = ?)
+           OR (d.id IS NULL AND parent.type = 'district' AND parent.name = ?)
+           OR (d.id IS NULL AND grandparent.type = 'district' AND grandparent.name = ?)
          )
        ORDER BY s.type ASC, s.name ASC`,
       [district, district, district]
@@ -639,7 +661,6 @@ app.get('/api/district-stats/:district', async (req, res) => {
     
     console.log(`📊 Found ${sensorRows.length} unmapped sensors in ${district}`);
     
-    // Group sensors by type
     const sensorsByType = {};
     
     for (const sensor of sensorRows) {
@@ -700,8 +721,6 @@ app.get('/api/district-stats/:district', async (req, res) => {
         };
       }
     }
-    
-    console.log(`✅ Calculated stats for ${district}:`, Object.keys(stats));
     
     res.json({
       success: true,
@@ -887,7 +906,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
 
     console.log(`📊 Fetching history for sensor ${devEUI}, range: ${rangeValue}`);
 
-    // Get sensor type from database
     const [sensorInfo] = await db.query(
       'SELECT type FROM sensors WHERE id = ?',
       [devEUI]
@@ -899,7 +917,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     
     const sensorType = sensorInfo[0].type;
 
-    // Query to get data points
     const fluxQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
         |> range(start: ${rangeValue})
@@ -922,20 +939,15 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       let value = null;
       let timestamp = row._time;
       
-      // Try multiple approaches to extract value
-      // Approach 1: Direct field match by sensor type
       if (row[sensorType] !== undefined) {
         value = typeof row[sensorType] === 'number' ? row[sensorType] : parseFloat(row[sensorType]);
       }
-      // Approach 2: Check for value field
       else if (row.value !== undefined) {
         value = typeof row.value === 'number' ? row.value : parseFloat(row.value);
       }
-      // Approach 3: Using _value field
       else if (row._value !== undefined) {
         value = typeof row._value === 'number' ? row._value : parseFloat(row._value);
       }
-      // Approach 4: Search for any numeric field
       else {
         for (let key in row) {
           if (!key.startsWith('_') && typeof row[key] === 'number' && key !== 'devEUI') {
@@ -945,8 +957,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
         }
       }
       
-      // Validate the value
-      if (value !== null && !isNaN(value) && isFinite(value) && value > -1000) {
+      if (value !== null && !isNaN(value) && isFinite(value)) {
         history.push({
           time: timestamp,
           value: value,
@@ -955,10 +966,7 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       }
     }
 
-    console.log(`✅ Returning ${history.length} valid numeric data points for sensor ${devEUI}`);
-    if (history.length > 0) {
-      console.log(`📊 Value range: ${Math.min(...history.map(h => h.value))} to ${Math.max(...history.map(h => h.value))}`);
-    }
+    console.log(`✅ Returning ${history.length} valid numeric data points`);
 
     res.json({
       success: true,
@@ -995,11 +1003,8 @@ app.get('/api/districts', async (req, res) => {
   }
 });
 
-// Get statistics for all districts at once
 app.get('/api/all-district-stats', async (req, res) => {
   try {
-    console.log('📍 Fetching statistics for all districts');
-    
     const [districtRows] = await db.query(
       `SELECT DISTINCT name
        FROM locations
@@ -1008,8 +1013,6 @@ app.get('/api/all-district-stats', async (req, res) => {
     );
     
     const allDistricts = districtRows.map(row => row.name);
-    console.log(`📊 Found ${allDistricts.length} districts`);
-    
     const allStats = {};
     
     for (const district of allDistricts) {
@@ -1025,7 +1028,6 @@ app.get('/api/all-district-stats', async (req, res) => {
         [district, district, district]
       );
       
-      // Group sensors by type
       const sensorsByType = {};
       
       for (const sensor of sensorRows) {
@@ -1042,7 +1044,6 @@ app.get('/api/all-district-stats', async (req, res) => {
         let total = 0;
         let validCount = 0;
         
-        // Fetch values for all sensors of this type
         const promises = sensors.map(async sensor => {
           const snapshot = await fetchLatestSensorSnapshot(
             sensor.sensor_id,
@@ -1384,6 +1385,16 @@ app.get('/api/debug/influx-check/:devEUI', async (req, res) => {
   }
 });
 
+app.get('/api/debug/raw', async (req, res) => {
+  try {
+    const query = `from(bucket: "${INFLUX_CONFIG.bucket}") |> range(start: -1h) |> limit(n: 20)`;
+    const result = await queryInfluxDB(query);
+    res.json({ success: true, count: result.length, data: result });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
 // ==================== UNASSIGNED SENSORS & MAPPING ====================
 
 app.get('/api/village-sensors/unassigned', async (req, res) => {
@@ -1496,24 +1507,16 @@ app.listen(PORT, () => {
   console.log('🚀 Smart Panchayat Backend');
   console.log('══════════════════════════════════════════════════════');
   console.log(`📡 Server running on port: ${PORT}`);
+  console.log(`📊 InfluxDB Bucket: ${INFLUX_CONFIG.bucket}`);
+  console.log(`🏢 InfluxDB Org: ${INFLUX_CONFIG.org}`);
   console.log(`🔧 API:    /api/*`);
   console.log(`📱 Mobile: /api/verify/*, /api/mobile/sensors`);
   console.log(`🏠 Admin:  http://localhost:${PORT}/admin`);
   console.log('══════════════════════════════════════════════════════');
-  console.log('✅ Available API Endpoints:');
-  console.log('   GET  /api/villagers');
-  console.log('   GET  /api/sensors');
-  console.log('   GET  /api/sensors/by-district?district=Kasaragod');
-  console.log('   GET  /api/sensors/:devEUI/history');
-  console.log('   GET  /api/district-stats/:district');
-  console.log('   GET  /api/mobile/sensors?phone=XXXXXXXXXX');
-  console.log('   GET  /api/admin/dashboard');
-  console.log('   GET  /api/districts');
-  console.log('   GET  /api/debug/influx-check/:devEUI');
-  console.log('   POST /api/verify/check-phone');
-  console.log('   POST /api/verify/send-otp');
-  console.log('   POST /api/verify/check-otp');
-  console.log('   GET  /api/village-sensors/unassigned?village=NAME');
-  console.log('   POST /api/sensors/map');
+  console.log('✅ Test endpoints:');
+  console.log(`   GET /api/health - Check database connections`);
+  console.log(`   GET /api/test-influx - Test InfluxDB connection`);
+  console.log(`   GET /api/sensors - List all sensors`);
+  console.log(`   GET /api/debug/raw - View raw InfluxDB data`);
   console.log('══════════════════════════════════════════════════════');
 });
