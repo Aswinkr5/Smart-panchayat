@@ -119,7 +119,7 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType, districtId) {
     
     const dataQuery = `
       from(bucket: "${INFLUX_CONFIG.bucket}")
-        |> range(start: -1h)
+        |> range(start: -5m)
         |> filter(fn: (r) => r._measurement == "${measurementName}")
         |> filter(fn: (r) => r.sensor_id == "${sensorId}")
         |> last()
@@ -139,24 +139,14 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType, districtId) {
       const diffSeconds = (Date.now() - readingTime.getTime()) / 1000;
       status = diffSeconds <= 22 ? 'Live' : 'Offline';
       
-      // Try to get value from different possible fields
+      // Get the value from _value field (this is what InfluxDB returns)
       let value = null;
       
-      // Check for value field
-      if (point.value !== undefined) {
-        value = point.value;
-      }
-      else if (point._value !== undefined) {
+      if (point._value !== undefined && point._value !== null) {
         value = point._value;
       }
-      else {
-        // Look for any numeric field
-        for (let key in point) {
-          if (!key.startsWith('_') && typeof point[key] === 'number') {
-            value = point[key];
-            break;
-          }
-        }
+      else if (point.value !== undefined) {
+        value = point.value;
       }
       
       if (value !== null && value !== undefined) {
@@ -171,6 +161,8 @@ async function fetchLatestSensorSnapshot(sensorId, sensorType, districtId) {
       if (measurement === 'No data' && point.measurement) {
         measurement = point.measurement;
       }
+      
+      console.log(`✅ Sensor ${sensorId} - Status: ${status}, Value: ${numericValue}, Time: ${time}`);
     } else {
       console.log(`⚠️ No data found for sensor ${sensorId} in measurement ${measurementName}`);
     }
@@ -677,20 +669,12 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
       let value = null;
       let timestamp = row._time;
       
-      // Try to get value from different possible fields
-      if (row.value !== undefined) {
-        value = typeof row.value === 'number' ? row.value : parseFloat(row.value);
-      }
-      else if (row._value !== undefined) {
+      // Get value from _value field (what InfluxDB returns)
+      if (row._value !== undefined && row._value !== null) {
         value = typeof row._value === 'number' ? row._value : parseFloat(row._value);
       }
-      else {
-        for (let key in row) {
-          if (!key.startsWith('_') && typeof row[key] === 'number' && key !== 'sensor_id') {
-            value = row[key];
-            break;
-          }
-        }
+      else if (row.value !== undefined) {
+        value = typeof row.value === 'number' ? row.value : parseFloat(row.value);
       }
       
       if (value !== null && !isNaN(value) && isFinite(value)) {
@@ -703,6 +687,10 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     }
 
     console.log(`✅ Returning ${history.length} valid numeric data points`);
+    
+    if (history.length > 0) {
+      console.log(`📊 Value range: ${Math.min(...history.map(h => h.value))} - ${Math.max(...history.map(h => h.value))}`);
+    }
 
     res.json({
       success: true,
@@ -721,7 +709,6 @@ app.get('/api/sensors/:devEUI/history', async (req, res) => {
     });
   }
 });
-
 // ==================== MOBILE ENDPOINTS ====================
 
 // Get sensors for a specific villager (mobile app)
